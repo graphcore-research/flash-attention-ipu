@@ -1,2 +1,2 @@
-# flash-attention-ipu
+# FlashAttention (IPU)
 Exchange-based FlashAttention for IPU
