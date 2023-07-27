@@ -13,12 +13,13 @@
 #include <popops/Zero.hpp>
 #include <poplin/Convolution.hpp>
 #include <poplin/MatMul.hpp>
-#include <poplin/Norms.hpp>
-#include <popnn/LayerNorm.hpp>
 #include <popnn/NonLinearity.hpp>
-#include <poprand/RandomGen.hpp>
 #include <poputil/Broadcast.hpp>
+
 #include <poputil/TileMapping.hpp>
+#include <poprand/RandomGen.hpp>
+#include <poplar/CycleCount.hpp>
+#include <poplar/SyncType.hpp>
 
 #include <poplin/codelets.hpp>
 #include <popops/codelets.hpp>
@@ -112,11 +113,10 @@ poplar::Tensor serialisedAttention(
     popops::zero(graph, out, prog, {dc, "zero_output"});
 
     // create tensors to store running softmax statistics
-    auto runningSums = popops::createSliceableTensor(graph, query.elementType(), {num_chunks_q, groups, chunkedQueryLen}, {0}, {1}, 4, {dc, "create_running_sum"});
-    auto runningMaxs = popops::createSliceableTensor(graph, query.elementType(), {num_chunks_q, groups, chunkedQueryLen}, {0}, {1}, 4, {dc, "create_running_max"});
+    auto runningStats = popops::createSliceableTensor(graph, query.elementType(), {num_chunks_q, 2, groups, chunkedQueryLen}, {0}, {1}, 4, {dc, "create running softmax stats"});
 
-    popops::zero(graph, runningSums, prog, {dc, "zero_running_sum"});
-    popops::fill(graph, runningMaxs, prog, -10000.0, "fill_running_max");
+    popops::zero(graph, runningStats.slice({0, 1}, 1), prog, {dc, "zero_running_sum"});
+    popops::fill(graph, runningStats.slice({1, 2}, 1), prog, -10000.0, "fill_running_max");
     
     // outer loop counter on kv read
     auto kvCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_kvCounter"});
@@ -147,8 +147,9 @@ poplar::Tensor serialisedAttention(
             auto qi = popops::dynamicSlice(graph, query, qCounter, {0}, {1}, qLoopProg, {dc, "q_i = q.at[i].get()"}).squeeze({0}); 
             auto oi = popops::dynamicSlice(graph, out, qCounter, {0}, {1}, qLoopProg, {dc, "o_i = o.at[i].get()"}).squeeze({0});             
             
-            auto runningMaxsi = popops::dynamicSlice(graph, runningMaxs, qCounter, {0}, {1}, qLoopProg, {dc, "m_i = m.at[i].get()"}).squeeze({0}); 
-            auto runningSumsi = popops::dynamicSlice(graph, runningSums, qCounter, {0}, {1}, qLoopProg, {dc, "s_i = s.at[i].get()"}).squeeze({0}); 
+            auto runningStatsi = popops::dynamicSlice(graph, runningStats, qCounter, {0}, {1}, qLoopProg, {dc, "get chunk stats"}).squeeze({0});
+            auto runningSumsi = runningStatsi.slice({0, 1}, 0).squeeze({0});
+            auto runningMaxsi = runningStatsi.slice({1, 2}, 0).squeeze({0});
 
             // compute qk^T
             auto t = poplin::matMulGrouped(graph, qi, kj.dimShuffle({0, 2, 1}), qLoopProg, kj.elementType(), {dc, "attn_ij = q_i @ k_j.T"});
@@ -186,8 +187,7 @@ poplar::Tensor serialisedAttention(
 
             // update output and running softmax stats
             popops::dynamicUpdate(graph, out, oi.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "o = o.at[i].set(o_i)"});
-            popops::dynamicUpdate(graph, runningMaxs, newMaxs.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "m = m.at[i].set(m_new)"});
-            popops::dynamicUpdate(graph, runningSums, newSums.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "s = s.at[i].set(s_new)"});
+            popops::dynamicUpdate(graph, runningStats, poplar::concat(newSums.expand({0}), newMaxs.expand({0})).expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "update chunk stats"});
             
             // update q loop counter
             popops::addInPlace(graph, qCounter, oneu, qLoopProg, {dc, "i+=1"});
@@ -239,14 +239,25 @@ int main(){
     Sequence prog;
     
     qkv = poprand::normal(graph, &seed, 0, qkv, qkv.elementType(), 0.0, 1.0, prog);
+    
+    Sequence vanillaAttentionProg;
+    Sequence serialisedAttentionProg;
 
-    auto out_v = vanillaAttention(graph, qkv, prog, {dc, "vanilla_attention"});
-    auto out_s = serialisedAttention(graph, qkv, 4, 4, prog, {dc, "serialised_attention"});
+    auto out_v = vanillaAttention(graph, qkv, vanillaAttentionProg, {dc, "vanilla_attention"});
+    auto out_s = serialisedAttention(graph, qkv, 4, 4, serialisedAttentionProg, {dc, "serialised_attention"});
+
+    auto vanillaAttentionCycles = poplar::cycleCount(graph, vanillaAttentionProg, 0, poplar::SyncType::EXTERNAL, {dc, "count cycles"});
+    auto serialisedAttentionCycles = poplar::cycleCount(graph, serialisedAttentionProg, 0, poplar::SyncType::EXTERNAL,{dc, "count cycles"});
+
+    prog.add(vanillaAttentionProg);
+    prog.add(serialisedAttentionProg);
 
     auto err = popops::sub(graph, out_v, out_s, prog, "e = x - y");
     popops::absInPlace(graph, err, prog, "e = abs(e)");
     auto maxErr = popops::reduce(graph, err, err.elementType(), {0, 1, 2}, {popops::Operation::MAX}, prog, "m = max(e)");
     prog.add(program::PrintTensor("maxErr", maxErr));
+    prog.add(program::PrintTensor("vanilla attention cycles", vanillaAttentionCycles[0])); // fine so long as it isn't > 2**31 cycles
+    prog.add(program::PrintTensor("serialised attention cycles", serialisedAttentionCycles[0])); // fine so long as it isn't > 2**31 cycles
 
     Engine engine(graph, prog, {{"debug.instrument", "true"}});
     engine.load(device);
