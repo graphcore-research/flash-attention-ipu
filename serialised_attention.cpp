@@ -47,6 +47,61 @@ std::vector<int32_t> getTriuOffsetSequence(
     uint32_t numRows,
     uint32_t numCols
 ) {
+
+    /* 
+    A utility function for generating triu offsets needed for causal masks
+
+    Rather than generate full [seqLen x seqLen] causal mask, generate only the causal mask blocks that you need.
+    When blocks are square, block intersect with diagonal with the same offset every time they intersect
+    
+    Example: a 4 x 4 upper triangular matrix split into 4 blocks of 2 x 2:
+
+    1 1 | 1 1
+    0 1 | 1 1
+    ---------
+    0 0 | 1 1
+    0 0 | 0 1
+
+    Notice that blocks along the diagonal have the same pattern. As a result, you only need to generate this upper triangular
+    block and use it every time
+
+    When blocks are non-square, blocks can intersect with the diagonal with a different offset.
+
+    Example: a 6 x 6 upper triangular matrix split into 6 blocks of 2 x 3:
+
+    1 1 1 | 1 1 1
+    0 1 1 | 1 1 1
+    -------------
+    0 0 1 | 1 1 1
+    0 0 0 | 1 1 1
+    -------------
+    0 0 0 | 0 1 1
+    0 0 0 | 0 0 1
+
+    Notice now that each block that intersect with the main diagonal has a different pattern. As a result, you need to generate
+    each of these blocks and use them in the order they are encountered. 
+
+    When blocks are non-square but the lowest common multiple of their dimensions are less than the dimension of the full square matrix,
+    a repeating pattern occurs.
+
+    Example: a 8 x 8 upper triangular matrix split into 8 blocks of 2 x 4:
+
+    1 1 1 1 | 1 1 1 1
+    0 1 1 1 | 1 1 1 1
+    -------------
+    0 0 1 1 | 1 1 1 1
+    0 0 0 1 | 1 1 1 1
+    -------------
+    0 0 0 0 | 1 1 1 1
+    0 0 0 0 | 0 1 1 1
+    -------------
+    0 0 0 0 | 0 0 1 1
+    0 0 0 0 | 0 0 0 1
+
+    Notice now that the two upper left blocks have the same pattern as the two lower right blocks. As a result, you only need
+    to generate two blocks and reuse these on each cycle through the block diagonal.
+    */
+
     std::vector<int32_t> offsets = {1};
     int tmp_offset = 1;
     int max_offset = numRows - 1;
@@ -105,13 +160,12 @@ poplar::Tensor vanillaAttention(
     auto key = qkv[1];
     auto value = qkv[2];
 
-    auto mask = graph.addVariable(query.elementType(), {seqLen, seqLen}, {dc, "mask = array(L, L)"});
-    poputil::mapTensorLinearly(graph, mask);
-    popops::fill(graph, mask, prog, -10000.0, {dc, "fill(mask, -10000)"});
-    triu(graph, mask, 1, prog, {dc, "triu(mask)"});
-
     // q @ k.T + mask
     auto attn = poplin::matMulGrouped(graph, query, key.dimShuffle({0, 2, 1}), prog, query.elementType(), {dc, "attn = Q@K.T"});
+    
+    auto mask = graph.clone(attn.elementType(), attn[0], {dc, "mask = array_like(attn[0])"});
+    popops::fill(graph, mask, prog, -10000.0, {dc, "fill(mask, -10000)"});
+    triu(graph, mask, 1, prog, {dc, "triu(mask)"});
     popops::addInPlace(graph, attn, mask.expand({0}), prog, {dc, "attn += mask"});
 
     // Stable softmax(x)
@@ -130,8 +184,8 @@ poplar::Tensor vanillaAttention(
 poplar::Tensor serialisedAttention(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
-    const uint32_t& num_chunks_q, 
-    const uint32_t& num_chunks_kv,
+    uint32_t num_chunks_q, 
+    uint32_t num_chunks_kv,
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc) {
 
@@ -168,97 +222,16 @@ poplar::Tensor serialisedAttention(
     popops::zero(graph, runningStats.slice({0, 1}, 1), prog, {dc, "zero_running_sum"});
     popops::fill(graph, runningStats.slice({1, 2}, 1), prog, -10000.0, "fill_running_max");
     
-    // create the masks needed ahead of time (this could be horrible, but hopefully not for typical use cases)
-    
-    /* 
-    Rather than generate full [seqLen x seqLen] causal mask, generate only the causal mask blocks that you need.
-    When blocks are square, block intersect with diagonal with the same offset every time they intersect
-    
-    Example: a 4 x 4 upper triangular matrix split into 4 blocks of 2 x 2:
-
-    1 1 | 1 1
-    0 1 | 1 1
-    ---------
-    0 0 | 1 1
-    0 0 | 0 1
-
-    Notice that blocks along the diagonal have the same pattern. As a result, you only need to generate this upper triangular
-    block and use it every time
-
-    When blocks are non-square, blocks can intersect with the diagonal with a different offset.
-
-    Example: a 6 x 6 upper triangular matrix split into 6 blocks of 2 x 3:
-
-    1 1 1 | 1 1 1
-    0 1 1 | 1 1 1
-    -------------
-    0 0 1 | 1 1 1
-    0 0 0 | 1 1 1
-    -------------
-    0 0 0 | 0 1 1
-    0 0 0 | 0 0 1
-
-    Notice now that each block that intersect with the main diagonal has a different pattern. As a result, you need to generate
-    each of these blocks and use them in the order they are encountered. 
-
-    When blocks are non-square but the lowest common multiple of their dimensions are less than the dimension of the full square matrix,
-    a repeating pattern occurs.
-
-    Example: a 8 x 8 upper triangular matrix split into 8 blocks of 2 x 4:
-
-    1 1 1 1 | 1 1 1 1
-    0 1 1 1 | 1 1 1 1
-    -------------
-    0 0 1 1 | 1 1 1 1
-    0 0 0 1 | 1 1 1 1
-    -------------
-    0 0 0 0 | 1 1 1 1
-    0 0 0 0 | 0 1 1 1
-    -------------
-    0 0 0 0 | 0 0 1 1
-    0 0 0 0 | 0 0 0 1
-
-    Notice now that the two upper left blocks have the same pattern as the two lower right blocks. As a result, you only need
-    to generate two blocks and reuse these on each cycle through the block diagonal.
-
-    The function `getTriuOffsetSequence` generates the correct sequence of offsets for use in a causal mask
-
-    We then use this sequence to generate the mask blocks needed for use in the serialised attention loop 
-    */
-    std::vector<int32_t> offsets = getTriuOffsetSequence(chunkedQueryLen, chunkedKVLen);
-    Tensor tmp_masks = graph.addConstant(qkv.elementType(), {offsets.size(), chunkedQueryLen, chunkedKVLen}, -10000.0, {"initialise_masks"});
-    poputil::mapTensorLinearly(graph, tmp_masks);
-    Tensor masks = popops::createSliceableTensor(graph, qkv.elementType(), {offsets.size(), chunkedQueryLen, chunkedKVLen}, {0}, {1}, 1, {"sliceable_masks"});
-    prog.add(Copy(tmp_masks, masks));
-
-    // Triu function above didn't work when passing a slice of a tensor, so it is inlined here
-    for (size_t i = 0; i < offsets.size(); ++i){
-        int k = offsets[i];
-        int m = masks.dim(masks.rank() - 2);
-        int n = masks.dim(masks.rank() - 1);
-
-        size_t start = 0;
-        for (int j = m; j > 0 && j-1+k > 0; --j){
-            size_t end = size_t(std::min(j-1+k, n));
-            popops::zero(graph, masks.slice({i, size_t(j-1), start}, {i+1, size_t(j), end}), prog);
-            }
-    }
-    
     // outer loop counter on kv read
     auto kvCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_kvCounter(j=0)"});
     // inner loop counter on q read
     auto qCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_qCounter(i=0)"});
-    
-    // mask counter on masked block execution
-    auto maskCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_maskCounter(k=0)"});
 
     // identity constants for inplace updates
     Tensor oneu = graph.addConstant<uint32_t>(UNSIGNED_INT, {1}, {1}, {dc, "init_counterIncrement"}); // for counters
     Tensor onef = graph.addConstant<float>(qkv.elementType(), {1}, {1.0}, {dc, "init_mmAccScale"}); // for output
     
     // gimme tiles
-    poputil::mapTensorLinearly(graph, masks);
-    poputil::mapTensorLinearly(graph, maskCounter);
     poputil::mapTensorLinearly(graph, kvCounter);
     poputil::mapTensorLinearly(graph, qCounter);
     poputil::mapTensorLinearly(graph, oneu);
@@ -292,6 +265,32 @@ poplar::Tensor serialisedAttention(
             // compute qk^t
             auto t = poplin::matMulGrouped(graph, qi, kj.dimShuffle({0, 2, 1}), doBlockProg, kj.elementType(), {dc, "attn_ij = q_i @ k_j.T"});
             
+            // Condition for making mask
+            auto doMakeMasks = popops::map(graph, (pe::_1 == 0) && (pe::_2 == 0), {qCounter, kvCounter}, doBlockProg, {dc, "i==0 and k==0"})[0];
+            
+            Sequence doMakeMasksProg;
+            std::vector<int32_t> offsets = getTriuOffsetSequence(chunkedQueryLen, chunkedKVLen);
+            auto masks = graph.cloneN(t.elementType(), t[0], offsets.size(), {dc, "masks = repeat(array_like(t[0]), offsets.size())"});
+            popops::fill(graph, masks, doMakeMasksProg, -10000.0, {dc, "fill(masks, -10000.0)"});
+            // Triu function above didn't work when passing a slice of a tensor, so it is inlined here
+            for (size_t i = 0; i < offsets.size(); ++i){
+                int k = offsets[i];
+                int m = masks.dim(masks.rank() - 2);
+                int n = masks.dim(masks.rank() - 1);
+
+                size_t start = 0;
+                for (int j = m; j > 0 && j-1+k > 0; --j){
+                    size_t end = size_t(std::min(j-1+k, n));
+                    popops::zero(graph, masks.slice({i, size_t(j-1), start}, {i+1, size_t(j), end}), doMakeMasksProg, {dc, "zero_for_triu(masks)"});
+                    }
+            }
+            // mask counter on masked block execution
+            auto maskCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_maskCounter(k=0)"});
+            poputil::mapTensorLinearly(graph, maskCounter);
+
+            Sequence skipMakeMasksProg;
+            doBlockProg.add(If(doMakeMasks, doMakeMasksProg, skipMakeMasksProg, {dc, "initialise_masks"}));
+
             // Condition for adding mask to q@k.T
             auto doMask = popops::map(graph, (pe::_1 * uint(chunkedQueryLen) <= ((pe::_2 + 1) * uint(chunkedKVLen) - 1)), {qCounter, kvCounter}, doBlockProg, {dc, "i * q_chunk_size <= (j+1) * kv_chunk_size"})[0];
             
