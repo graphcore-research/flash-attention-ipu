@@ -175,8 +175,7 @@ poplar::Tensor vanillaAttention(
     popops::subInPlace(graph, attn, m.expand({2}), prog, {dc, "attn -= m"});
     popops::expInPlace(graph, attn, prog, {dc, "attn = exp(attn)"});
     auto s = popops::reduce(graph, attn, attn.elementType(), {2}, {popops::Operation::ADD}, prog, {dc, "s = sum(attn, dim=2)"});
-    popops::invInPlace(graph, s, prog, {dc, "s = 1/s"});
-    popops::mulInPlace(graph, attn, s.expand({2}), prog, {dc, "attn *= s"});
+    popops::divInPlace(graph, attn, s.expand({2}), prog, {dc, "attn /= s"});
 
     // attn @ v
     auto out = poplin::matMulGrouped(graph, attn, value, prog, value.elementType(), {dc, "out = attn@V"});
@@ -304,7 +303,7 @@ poplar::Tensor serialisedAttention(
             auto blockMask = popops::dynamicSlice(graph, masks, maskCounter, {0}, {1}, doMaskProg, {dc, "get_mask"}).squeeze({0});
             popops::addInPlace(graph, t, blockMask.expand({0}), doMaskProg, {dc, "attn_ij += mask_ij"});
             // update mask counter
-            popops::mapInPlace(graph, ((pe::_1 + 1)%uint(masks.dim(0))), {maskCounter}, prog, {dc, "k = (k+1)%masks.size()"});
+            popops::mapInPlace(graph, ((pe::_1 + 1)%uint(masks.dim(0))), {maskCounter}, doMaskProg, {dc, "k = (k+1)%masks.size()"});
 
             // Empty skip mask program
             Sequence skipMaskProg;
@@ -323,25 +322,21 @@ poplar::Tensor serialisedAttention(
             auto newMaxs = popops::max(graph, runningMaxsi, tmpMaxs, doBlockProg, {dc, "m_new = max(m_i, m_tmp)"});
             
             // compute softmax update scaling factors
-            auto tmpSumScale = popops::sub(graph, tmpMaxs, newMaxs, doBlockProg, {dc, "c_tmp = m_tmp - m_new"});
-            popops::expInPlace(graph, tmpSumScale, doBlockProg, {dc, "c_tmp = exp(c_tmp)"});
-            auto runningSumScale = popops::sub(graph, runningMaxsi, newMaxs, doBlockProg, {dc, "c_i = m_i - m_new"});
-            popops::expInPlace(graph, runningSumScale, doBlockProg, {dc, "c_i = exp(c_i)"});
+            auto tmpSumScale = popops::map(graph, pe::Exp(pe::_1 - pe::_2), {tmpMaxs, newMaxs}, doBlockProg, {dc, "c_tmp = exp(m_tmp - m_new)"});
+            auto runningSumScale = popops::map(graph, pe::Exp(pe::_1 - pe::_2), {runningMaxsi, newMaxs}, doBlockProg, {dc, "c_i = exp(m_i - m_new)"});
 
             // compute running sum update
             auto newSums = popops::reduce(graph, t, t.elementType(), {2}, {popops::Operation::ADD}, doBlockProg, {dc, "s_new = sum(attn_ij, dim=2)"});
             
             // scale updates from past statistics
-            popops::mulInPlace(graph, newSums, tmpSumScale, doBlockProg, {dc, "s_new *= c_tmp"});
             popops::mulInPlace(graph, runningSumsi, runningSumScale, doBlockProg, {dc, "s_i *= c_i"});
-            popops::addInPlace(graph, newSums, runningSumsi, doBlockProg, {dc, "s_new += s_i"});
+            newSums = popops::map(graph, pe::_1*pe::_2 + pe::_3, {newSums, tmpSumScale, runningSumsi}, doBlockProg, {dc, "s_new = s_new * c_tmp + s_i"});
 
-            // compute 
+            // compute output(o_i = (s_i*o_i + c_tmp*attn_ij @ v_j)/ s_new)
             popops::mulInPlace(graph, oi, runningSumsi.expand({2}), doBlockProg, {dc, "o_i *= s_i"});
             popops::mulInPlace(graph, t, tmpSumScale.expand({2}), doBlockProg, {dc, "attn_ij *= c_tmp"});
-            poplin::matMulGroupedAcc(graph, oi, onef, t, vj, doBlockProg, {dc, "oi += attn_ij @ v_j"});
-            auto invNewSums = popops::inv(graph, newSums.expand({2}), doBlockProg, {dc, "s_inv = 1 / s_new"});
-            popops::mulInPlace(graph, oi, invNewSums, doBlockProg, {dc, "o_i *= s_inv"});
+            poplin::matMulGroupedAcc(graph, oi, onef, t, vj, doBlockProg, {dc, "o_i += attn_ij @ v_j"});
+            popops::divInPlace(graph, oi, newSums.expand({2}), doBlockProg, {dc, "o_i /= s_new"});
 
             // update output and running softmax stats
             popops::dynamicUpdate(graph, out, oi.expand({0}), qCounter, {0}, {1}, doBlockProg, {dc, "o = o.at[i].set(o_i)"});
