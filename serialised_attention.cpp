@@ -163,6 +163,8 @@ poplar::Tensor vanillaAttention(
     // q @ k.T + mask
     auto attn = poplin::matMulGrouped(graph, query, key.dimShuffle({0, 2, 1}), prog, query.elementType(), {dc, "attn = Q@K.T"});
     
+    // generate causal masks
+    // clone attention matrix to colocate mask elements with attn matrix elements
     auto mask = graph.clone(attn.elementType(), attn[0], {dc, "mask = array_like(attn[0])"});
     popops::fill(graph, mask, prog, -10000.0, {dc, "fill(mask, -10000)"});
     triu(graph, mask, 1, prog, {dc, "triu(mask)"});
@@ -268,8 +270,11 @@ poplar::Tensor serialisedAttention(
             // Condition for making mask
             auto doMakeMasks = popops::map(graph, (pe::_1 == 0) && (pe::_2 == 0), {qCounter, kvCounter}, doBlockProg, {dc, "i==0 and k==0"})[0];
             
+            // generate causal masks
+            // clone attention matrix block to colocate mask block elements with attn matrix block elements
             Sequence doMakeMasksProg;
             std::vector<int32_t> offsets = getTriuOffsetSequence(chunkedQueryLen, chunkedKVLen);
+            // use cloneN to generate as many as needed by offsets.size()
             auto masks = graph.cloneN(t.elementType(), t[0], offsets.size(), {dc, "masks = repeat(array_like(t[0]), offsets.size())"});
             popops::fill(graph, masks, doMakeMasksProg, -10000.0, {dc, "fill(masks, -10000.0)"});
             // Triu function above didn't work when passing a slice of a tensor, so it is inlined here
