@@ -104,8 +104,8 @@ std::vector<int32_t> getTriuOffsetSequence(
 
     std::vector<int32_t> offsets = {1};
     int tmp_offset = 1;
-    int max_offset = numRows - 1;
-    int min_offset = 2 - numCols;
+    int max_offset = numCols - 1;
+    int min_offset = 2 - numRows;
 
     while(true) {
         tmp_offset += numRows;
@@ -247,7 +247,7 @@ poplar::Tensor serialisedAttention(
         Sequence qLoopProg; {
             
             // Condition for executing (true) or skipping (false) block
-            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen) - 1) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, qLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];            
+            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, qLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];            
             
             // Conditional execute block program body
             Sequence doBlockProg; 
@@ -264,7 +264,7 @@ poplar::Tensor serialisedAttention(
             auto t = poplin::matMulGrouped(graph, qi, kj.dimShuffle({0, 2, 1}), doBlockProg, kj.elementType(), {dc, "attn_ij = q_i @ k_j.T"});
             
             // Condition for making mask
-            auto doMakeMasks = popops::map(graph, (pe::_1 == 0) && (pe::_2 == 0), {qCounter, kvCounter}, doBlockProg, {dc, "i==0 and k==0"})[0];
+            auto doMakeMasks = popops::map(graph, (pe::_1 == 0) && (pe::_2 == 0), {qCounter, kvCounter}, doBlockProg, {dc, "i==0 and j==0"})[0];
             
             // generate causal masks
             // clone attention matrix block to colocate mask block elements with attn matrix block elements
@@ -293,7 +293,7 @@ poplar::Tensor serialisedAttention(
             doBlockProg.add(If(doMakeMasks, doMakeMasksProg, skipMakeMasksProg, {dc, "initialise_masks"}));
 
             // Condition for adding mask to q@k.T
-            auto doMask = popops::map(graph, (pe::_1 * uint(chunkedQueryLen) <= ((pe::_2 + 1) * uint(chunkedKVLen) - 1)), {qCounter, kvCounter}, doBlockProg, {dc, "i * q_chunk_size <= (j+1) * kv_chunk_size"})[0];
+            auto doMask = popops::map(graph, (pe::_1 * uint(chunkedQueryLen) < ((pe::_2 + 1) * uint(chunkedKVLen) - 1)), {qCounter, kvCounter}, doBlockProg, {dc, "i * q_chunk_size <= (j+1) * kv_chunk_size"})[0];
             
             // Conditional add mask program body
             Sequence doMaskProg; 
