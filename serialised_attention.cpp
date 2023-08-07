@@ -227,16 +227,13 @@ poplar::Tensor serialisedAttention(
     auto kvCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_kvCounter(j=0)"});
     // inner loop counter on q read
     auto qCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_qCounter(i=0)"});
-
-    // identity constants for inplace updates
-    Tensor oneu = graph.addConstant<uint32_t>(UNSIGNED_INT, {1}, {1}, {dc, "init_counterIncrement"}); // for counters
-    Tensor onef = graph.addConstant<float>(qkv.elementType(), {1}, {1.0}, {dc, "init_mmAccScale"}); // for output
     
     // gimme tiles
     poputil::mapTensorLinearly(graph, kvCounter);
     poputil::mapTensorLinearly(graph, qCounter);
-    poputil::mapTensorLinearly(graph, oneu);
-    poputil::mapTensorLinearly(graph, onef);
+
+    popops::zero(graph, kvCounter, prog, {dc, "zero_kvCounter"});
+    popops::zero(graph, qCounter, prog, {dc, "zero_qCounter"});
 
     // Setup repeat loops. Use whitespace indentation for python-like readability
 
@@ -335,7 +332,7 @@ poplar::Tensor serialisedAttention(
             // compute output(o_i = (s_i*o_i + c_tmp*attn_ij @ v_j)/ s_new)
             popops::mulInPlace(graph, oi, runningSumsi.expand({2}), doBlockProg, {dc, "o_i *= s_i"});
             popops::mulInPlace(graph, t, tmpSumScale.expand({2}), doBlockProg, {dc, "attn_ij *= c_tmp"});
-            poplin::matMulGroupedAcc(graph, oi, onef, t, vj, doBlockProg, {dc, "o_i += attn_ij @ v_j"});
+            poplin::matMulGroupedAcc(graph, oi, 1.0, t, vj, doBlockProg, {dc, "o_i += attn_ij @ v_j"});
             popops::divInPlace(graph, oi, newSums.expand({2}), doBlockProg, {dc, "o_i /= s_new"});
 
             // update output and running softmax stats
@@ -345,13 +342,13 @@ poplar::Tensor serialisedAttention(
             Sequence skipBlockProg;
             qLoopProg.add(If(doBlock, doBlockProg, skipBlockProg));
 
-            popops::addInPlace(graph, qCounter, oneu, qLoopProg, {dc, "i+=1"});
+            popops::mapInPlace(graph, pe::_1 + 1, {qCounter}, qLoopProg, {dc, "i+=1"});
             // update q loop counter
         }
         // repeat q loop body in kv loop body
         kvLoopProg.add(Repeat(query.dim(0), qLoopProg, {dc, "serialised_attention_inner_loop_repeat"}));
         // update kv loop counter
-        popops::addInPlace(graph, kvCounter, oneu, kvLoopProg, {dc, "j+=1"});
+        popops::mapInPlace(graph, pe::_1 + 1, {kvCounter}, kvLoopProg, {dc, "j+=1"});
         // reset q loop counter
         popops::zero(graph, qCounter, kvLoopProg, {dc, "i=0"});
     }
