@@ -139,8 +139,8 @@ void triu(
     for (int i = m; i > 0 && i-1+k > 0; --i){
         size_t end = size_t(std::min(i-1+k, n));
         popops::zero(graph, t.slice({size_t(i-1), start}, {size_t(i), end}), prog);
-        }
     }
+}
 
 poplar::Tensor vanillaAttention(
     poplar::Graph& graph,
@@ -288,12 +288,13 @@ poplar::Tensor serialisedAttention(
             // mask counter on masked block execution
             auto maskCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_maskCounter(k=0)"});
             poputil::mapTensorLinearly(graph, maskCounter);
+            popops::zero(graph, maskCounter, doMakeMasksProg, {dc, "zero_maskCounter"});
 
             Sequence skipMakeMasksProg;
             doBlockProg.add(If(doMakeMasks, doMakeMasksProg, skipMakeMasksProg, {dc, "initialise_masks"}));
 
             // Condition for adding mask to q@k.T
-            auto doMask = popops::map(graph, (pe::_1 * uint(chunkedQueryLen) < ((pe::_2 + 1) * uint(chunkedKVLen) - 1)), {qCounter, kvCounter}, doBlockProg, {dc, "i * q_chunk_size <= (j+1) * kv_chunk_size"})[0];
+            auto doMask = popops::map(graph, (pe::_1 * uint(chunkedQueryLen) < ((pe::_2 + 1) * uint(chunkedKVLen) - 1)), {qCounter, kvCounter}, doBlockProg, {dc, "i * q_chunk_size < (j+1) * kv_chunk_size - 1"})[0];
             
             // Conditional add mask program body
             Sequence doMaskProg; 
