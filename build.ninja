@@ -1,0 +1,26 @@
+cpppath = -isystem third_party/poplar/include -Ithird_party/catch2/extras
+cppflags = -Wall -Wextra -Werror -Wno-unused-function -std=c++14 -O2 -g -fPIC -fdiagnostics-color=always
+linkflags = $cppflags -Wl,--no-undefined
+libs = -lpopnn -lpoplin -lpopops -lpoprand -lpoputil -lpoplar
+
+rule compile
+    command = g++ -MD -MF$out.d $cppflags $cpppath -c $in -o $out
+    deps = gcc
+    depfile = $out.d
+
+rule linkso
+    command = g++ $linkflags -shared $in -o $out $libs
+
+rule linkexe
+    command = g++ $linkflags $in -o $out $libs
+
+# Library
+build build/obj/serialised_attention.o: compile serialised_attention.cpp
+
+# Tests
+build build/obj/tests/catch.o: compile third_party/catch2/extras/catch_amalgamated.cpp
+build build/obj/tests/test_serialised_attention.o: compile test_serialised_attention.cpp
+
+# ...link
+build build/tests: linkexe build/obj/serialised_attention.o $
+      build/obj/tests/test_serialised_attention.o build/obj/tests/catch.o
