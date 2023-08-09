@@ -17,15 +17,12 @@
 #include <poputil/Broadcast.hpp>
 
 #include <poputil/TileMapping.hpp>
-#include <poprand/RandomGen.hpp>
-#include <poplar/CycleCount.hpp>
 #include <poplar/SyncType.hpp>
 
 #include <poplin/codelets.hpp>
 #include <popops/codelets.hpp>
 #include <popnn/codelets.hpp>
 #include <poprand/codelets.hpp>
-
 
 #include <iostream>
 #include <algorithm>
@@ -141,7 +138,7 @@ void triu(
     size_t start = 0;
     for (int i = m; i > 0 && i-1+k > 0; --i){
         size_t end = size_t(std::min(i-1+k, n));
-        popops::zero(graph, t.slice({size_t(i-1), start}, {size_t(i), end}), prog);
+        popops::zero(graph, t.slice({size_t(i-1), start}, {size_t(i), end}), prog, {dc, "triu_zero"});
         }
     }
 
@@ -152,11 +149,6 @@ poplar::Tensor vanillaAttention(
     const poplar::DebugContext& dc) {
 
     assert(qkv.dim(0) == 3);
-
-    // get shape data
-    auto groups = qkv.dim(1); // groups = batch_size * num_heads
-    auto seqLen = qkv.dim(2);
-    auto headDim = qkv.dim(3);
 
     // q, k, v = qkv
     auto query = qkv[0];

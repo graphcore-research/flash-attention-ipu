@@ -5,6 +5,8 @@
 #include <poplar/Graph.hpp>
 #include <poplar/Tensor.hpp>
 
+using namespace poplar;
+
 poplar::Tensor vanillaAttention(
     poplar::Graph& graph,
     const poplar::Tensor& qkv, // Shape 3 x G x L x D
@@ -17,6 +19,6 @@ poplar::Tensor serialisedAttention(
     uint32_t num_chunks_q, 
     uint32_t num_chunks_kv,
     poplar::program::Sequence& prog,
-    const poplar::DebugContext& dc)
+    const poplar::DebugContext& dc);
 
 #endif
