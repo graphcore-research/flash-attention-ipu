@@ -17,8 +17,6 @@
 #include <poputil/Broadcast.hpp>
 
 #include <poputil/TileMapping.hpp>
-#include <poprand/RandomGen.hpp>
-#include <poplar/CycleCount.hpp>
 #include <poplar/SyncType.hpp>
 
 #include <poplin/codelets.hpp>
@@ -29,6 +27,8 @@
 #include <iostream>
 #include <algorithm>
 #include <vector>
+
+#include "serialised_attention.hpp"
 
 using namespace poplar;
 using namespace poplar::program;
@@ -138,7 +138,7 @@ void triu(
     size_t start = 0;
     for (int i = m; i > 0 && i-1+k > 0; --i){
         size_t end = size_t(std::min(i-1+k, n));
-        popops::zero(graph, t.slice({size_t(i-1), start}, {size_t(i), end}), prog);
+        popops::zero(graph, t.slice({size_t(i-1), start}, {size_t(i), end}), prog, {dc, "triu_zero"});
     }
 }
 
@@ -149,11 +149,6 @@ poplar::Tensor vanillaAttention(
     const poplar::DebugContext& dc) {
 
     assert(qkv.dim(0) == 3);
-
-    // get shape data
-    auto groups = qkv.dim(1); // groups = batch_size * num_heads
-    auto seqLen = qkv.dim(2);
-    auto headDim = qkv.dim(3);
 
     // q, k, v = qkv
     auto query = qkv[0];
@@ -357,65 +352,4 @@ poplar::Tensor serialisedAttention(
 
     out = out.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
     return out;
-}
-
-int main(){
-
-    Device device;
-    auto manager = DeviceManager::createDeviceManager();
-    auto devices = manager.getDevices(poplar::TargetType::IPU, 1);
-    std::cout << "Trying to attach to IPU \n";
-    
-    auto it = std::find_if(devices.begin(), devices.end(), [](Device &device){return device.attach();});
-
-    if (it == devices.end()) {
-        std::cerr << "Error attaching to device \n";
-        return 1;
-    }
-    device = std::move(*it);
-    std::cout << "Attached to IPU " << device.getId() << std::endl;
-
-    Graph graph(device.getTarget());
-
-    popops::addCodelets(graph);
-    poplin::addCodelets(graph);
-    popnn::addCodelets(graph);
-    poprand::addCodelets(graph);
-
-    Tensor qkv = graph.addVariable(HALF, {3, 8, 2048, 128});
-    poputil::mapTensorLinearly(graph, qkv);
-
-    const Tensor seed = graph.addConstant<uint32_t>(UNSIGNED_INT, {2}, {40, 90});
-    poputil::mapTensorLinearly(graph, seed);
-
-    poplar::DebugContext dc;
-
-    Sequence prog;
-    
-    qkv = poprand::normal(graph, &seed, 0, qkv, qkv.elementType(), 0.0, 1.0, prog);
-    
-    Sequence vanillaAttentionProg;
-    Sequence serialisedAttentionProg;
-
-    auto out_v = vanillaAttention(graph, qkv, vanillaAttentionProg, {dc, "vanilla_attention"});
-    auto out_s = serialisedAttention(graph, qkv, 4, 4, serialisedAttentionProg, {dc, "serialised_attention"});
-
-    auto vanillaAttentionCycles = poplar::cycleCount(graph, vanillaAttentionProg, 0, poplar::SyncType::EXTERNAL, {dc, "count cycles"});
-    auto serialisedAttentionCycles = poplar::cycleCount(graph, serialisedAttentionProg, 0, poplar::SyncType::EXTERNAL,{dc, "count cycles"});
-
-    prog.add(vanillaAttentionProg);
-    prog.add(serialisedAttentionProg);
-
-    auto err = popops::sub(graph, out_v, out_s, prog, "e = x - y");
-    popops::absInPlace(graph, err, prog, "e = abs(e)");
-    auto maxErr = popops::reduce(graph, err, err.elementType(), {0, 1, 2}, {popops::Operation::MAX}, prog, "m = max(e)");
-    prog.add(program::PrintTensor("maxErr", maxErr));
-    prog.add(program::PrintTensor("vanilla attention cycles", vanillaAttentionCycles[0])); // fine so long as it isn't > 2**31 cycles
-    prog.add(program::PrintTensor("serialised attention cycles", serialisedAttentionCycles[0])); // fine so long as it isn't > 2**31 cycles
-
-    Engine engine(graph, prog, {{"debug.instrument", "true"}});
-    engine.load(device);
-    engine.run(0);
-    return 0;
-
 }

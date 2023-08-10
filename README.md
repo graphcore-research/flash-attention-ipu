@@ -5,8 +5,10 @@
 ```bash
 git clone git@github.com:graphcore-research/flash-attention-ipu.git
 cd flash-attention-ipu
-make
-./serialised_attention
+ninja
+
+#Optional
+./build/tests
 ```
 
 
