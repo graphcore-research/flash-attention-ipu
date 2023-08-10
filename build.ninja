@@ -18,7 +18,7 @@ rule linkexe
 build build/obj/serialised_attention.o: compile flash_attention_ipu/cpp/serialised_attention.cpp
 
 # ...link
-build build/obj/lib_flash_attention.so: linkso build/obj/serialised_attention.o
+build build/lib_flash_attention.so: linkso build/obj/serialised_attention.o
 
 
 # Tests

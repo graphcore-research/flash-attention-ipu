@@ -19,4 +19,5 @@ def _load_native_library() -> None:
 
 _load_native_library()
 
+from ._impl.serialised_attention import *
 from ._impl.serialised_attention import __all__
