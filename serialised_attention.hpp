@@ -5,8 +5,6 @@
 #include <poplar/Graph.hpp>
 #include <poplar/Tensor.hpp>
 
-using namespace poplar;
-
 poplar::Tensor vanillaAttention(
     poplar::Graph& graph,
     const poplar::Tensor& qkv, // Shape 3 x G x L x D
