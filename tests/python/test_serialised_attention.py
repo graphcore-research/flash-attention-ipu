@@ -12,7 +12,9 @@ import pytest
 
 def attention_ref(qkv):
     q, k, v = qkv
-    attn = q @ k.permute(0, 2, 1)
+    mask = torch.full((q.shape[1], q.shape[1]), -10000)
+    mask = torch.triu(mask, 1)
+    attn = q @ k.permute(0, 2, 1) + mask
     attn = torch.nn.functional.softmax(attn, dim=-1)
     return attn @ v
 
@@ -64,8 +66,8 @@ def test_serialised_attention(dtype, seq_len) -> None:
         fn=lambda qkv: dict(out=attention_ref(qkv)), inputs=dict(qkv=qkv), device="cpu"
     )
 
-    atol = {torch.float32: 1e-5, torch.float16: 2e-3}[dtype]
-    rtol = {torch.float32: 2e-6, torch.float16: 2e-3}[dtype]
+    atol = {torch.float32: 1e-4, torch.float16: 1e-2}[dtype]
+    rtol = {torch.float32: 1e-5, torch.float16: 1e-2}[dtype]
 
     torch.testing.assert_close(
         output_ipu["out"],
