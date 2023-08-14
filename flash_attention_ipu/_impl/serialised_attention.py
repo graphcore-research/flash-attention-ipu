@@ -2,7 +2,19 @@ import poptorch
 import torch
 
 
-def serialised_attention(qkv: torch.Tensor, num_chunks_q: int, num_chunks_kv: int):
+def serialised_attention(
+    qkv: torch.Tensor, num_chunks_q: int, num_chunks_kv: int
+) -> torch.Tensor:
+    """
+    Memory-efficient causally masked multi-head attention from a packed qkv tensor
+
+    Computes `nn.softmax(Q@K.T, dim=-1)@V` without materialising the full attention
+    matrix using chunking and online softmax for memory optimisation
+
+    qkv -- shape (3, N, L, D)
+    returns -- shape (N, L, D)
+
+    """
     if qkv.ndim != 4:
         raise ValueError("serialed_attention expects qkv input to have 4 dimensions")
     if qkv.shape[0] != 3:
