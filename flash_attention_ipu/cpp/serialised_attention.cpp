@@ -185,7 +185,7 @@ poplar::Tensor vanillaAttention(
     return out;
 }
 
-poplar::Tensor vanillaAttentionBackward(
+poplar::Tensor vanillaAttentionGrad(
     poplar::Graph& graph,
     const poplar::Tensor& qkv, // shape 3 x G x L x D
     const poplar::Tensor& grad, // shape G x L x D
@@ -416,6 +416,52 @@ poplar::Tensor serialisedAttention(
 
     out = out.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
     return out;
+}
+
+poplar::Tensor serialisedAttentionGrad(
+    poplar::Graph& graph,
+    const poplar::Tensor& qkv, // Shape 3 x G x L x D
+    const poplar::Tensor& grad, // Shape G x L x D
+    uint32_t num_chunks_q,
+    uint32_t num_chunks_kv,
+    poplar::program::Sequence& prog,
+    const poplar::DebugContext& dc) {
+
+    auto out_rec = serialisedAttention(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "recompute_output"});
+
+    assert(qkv.dim(0) == 3);
+
+    // get shape data
+    auto groups = qkv.dim(1); // groups = batch_size * num_heads
+    auto seqLen = qkv.dim(2);
+    auto headDim = qkv.dim(3);
+    
+    assert(seqLen % num_chunks_q == 0);
+    assert(seqLen % num_chunks_kv == 0);
+
+    // compute sizes of chunked sequence length
+    auto chunkedQueryLen = seqLen / num_chunks_q; 
+    auto chunkedKVLen = seqLen / num_chunks_kv; 
+
+    // Unpack q,k,v and copy data to sliceable tensors with nice tile mappings
+    auto query = popops::createSliceableTensor(graph, qkv.elementType(), {num_chunks_q, groups, chunkedQueryLen, headDim}, {0}, {1}, 4, {dc, "create_query"});
+    auto key = popops::createSliceableTensor(graph, qkv.elementType(), {num_chunks_kv, groups, chunkedKVLen, headDim}, {0}, {1}, 4, {dc, "create_key"});
+    auto value = popops::createSliceableTensor(graph, qkv.elementType(), {num_chunks_kv, groups, chunkedKVLen, headDim}, {0}, {1}, 4, {dc, "create_value"});
+    auto out = popops::createSliceableTensor(graph, out_rec.elementType(), {num_chunks_q, groups, chunkedQueryLen, headDim}, {0}, {1}, 4, {"create_output"});
+
+    prog.add(Copy(qkv[0].reshape({groups, num_chunks_q, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), query));
+    prog.add(Copy(qkv[1].reshape({groups, num_chunks_kv, chunkedKVLen, headDim}).dimShuffle({1, 0, 2, 3}), key));
+    prog.add(Copy(qkv[2].reshape({groups, num_chunks_kv, chunkedKVLen, headDim}).dimShuffle({1, 0, 2, 3}), value));
+    prog.add(Copy(out_rec.reshape({groups, num_chunks_kv, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), out));
+
+    auto query_grad = graph.clone(query, {dc, "dquery = array_like(query)"});
+    auto key_grad = graph.clone(key, {dc, "dkey = array_like(key)"});
+    auto value_grad = graph.clone(value, {dc, "dvalue = array_like(value)"});
+
+    popops::zero(graph, query_grad, prog, {dc, "zero_dquery"});
+    popops::zero(graph, key_grad, prog, {dc, "zero_dkey"});
+    popops::zero(graph, value_grad, prog, {dc, "zero_dvalue"});
+
 }
 
 // popart
