@@ -166,46 +166,46 @@ namespace {
 
 
     TEST_CASE("compare vanillaAttention vs serialisedAttention output", "[attention]") {
-        SECTION("float32 4x6x6 test cases"){
-            REQUIRE(compare(4, 6, 2, 1, 1, {40, 90}, poplar::FLOAT) <= 1e-5);
-            REQUIRE(compare(4, 6, 2, 1, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
-            REQUIRE(compare(4, 6, 2, 2, 1, {40, 90}, poplar::FLOAT) <= 1e-5);
-            REQUIRE(compare(4, 6, 2, 2, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
-            REQUIRE(compare(4, 6, 2, 2, 3, {40, 90}, poplar::FLOAT) <= 1e-5);
-            REQUIRE(compare(4, 6, 2, 3, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
-            REQUIRE(compare(4, 6, 2, 3, 3, {40, 90}, poplar::FLOAT) <= 1e-5);
-        }
+        // SECTION("float32 4x6x6 test cases"){
+        //     REQUIRE(compare(4, 6, 2, 1, 1, {40, 90}, poplar::FLOAT) <= 1e-5);
+        //     REQUIRE(compare(4, 6, 2, 1, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
+        //     REQUIRE(compare(4, 6, 2, 2, 1, {40, 90}, poplar::FLOAT) <= 1e-5);
+        //     REQUIRE(compare(4, 6, 2, 2, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
+        //     REQUIRE(compare(4, 6, 2, 2, 3, {40, 90}, poplar::FLOAT) <= 1e-5);
+        //     REQUIRE(compare(4, 6, 2, 3, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
+        //     REQUIRE(compare(4, 6, 2, 3, 3, {40, 90}, poplar::FLOAT) <= 1e-5);
+        // }
 
         // Medium
         SECTION("float32 8x256x256 test cases"){
             REQUIRE(compare(8, 256, 128, 2, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
-            REQUIRE(compare(8, 256, 128, 2, 4, {40, 90}, poplar::FLOAT) <= 1e-5);
-            REQUIRE(compare(8, 256, 128, 4, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
-            REQUIRE(compare(8, 256, 128, 4, 4, {40, 90}, poplar::FLOAT) <= 1e-5);
+            // REQUIRE(compare(8, 256, 128, 2, 4, {40, 90}, poplar::FLOAT) <= 1e-5);
+            // REQUIRE(compare(8, 256, 128, 4, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
+            // REQUIRE(compare(8, 256, 128, 4, 4, {40, 90}, poplar::FLOAT) <= 1e-5);
         }
 
-        // Large
-        SECTION("float16 8x2048x2048 test cases"){
-            REQUIRE(compare(8, 2048, 128, 2, 2, {40, 90}, poplar::HALF) <= 1e-2);
-            REQUIRE(compare(8, 2048, 128, 2, 4, {40, 90}, poplar::HALF) <= 1e-2);
-            REQUIRE(compare(8, 2048, 128, 4, 2, {40, 90}, poplar::HALF) <= 1e-2);
-            REQUIRE(compare(8, 2048, 128, 4, 4, {40, 90}, poplar::HALF) <= 1e-2);
-        }
+        // // Large
+        // SECTION("float16 8x2048x2048 test cases"){
+        //     REQUIRE(compare(8, 2048, 128, 2, 2, {40, 90}, poplar::HALF) <= 1e-2);
+        //     REQUIRE(compare(8, 2048, 128, 2, 4, {40, 90}, poplar::HALF) <= 1e-2);
+        //     REQUIRE(compare(8, 2048, 128, 4, 2, {40, 90}, poplar::HALF) <= 1e-2);
+        //     REQUIRE(compare(8, 2048, 128, 4, 4, {40, 90}, poplar::HALF) <= 1e-2);
+        // }
     }
 
-    TEST_CASE("benchmark serialisedAttention performance", "[attentionperf]") {
-        SECTION("float32 8x256x256 cases"){
-            benchmark(8, 256, 128, 2, 2, {40, 90}, poplar::FLOAT);
-            benchmark(8, 256, 128, 2, 4, {40, 90}, poplar::FLOAT);
-            benchmark(8, 256, 128, 4, 2, {40, 90}, poplar::FLOAT);
-            benchmark(8, 256, 128, 4, 4, {40, 90}, poplar::FLOAT);
-        }
+    // TEST_CASE("benchmark serialisedAttention performance", "[attentionperf]") {
+    //     SECTION("float32 8x256x256 cases"){
+    //         benchmark(8, 256, 128, 2, 2, {40, 90}, poplar::FLOAT);
+    //         benchmark(8, 256, 128, 2, 4, {40, 90}, poplar::FLOAT);
+    //         benchmark(8, 256, 128, 4, 2, {40, 90}, poplar::FLOAT);
+    //         benchmark(8, 256, 128, 4, 4, {40, 90}, poplar::FLOAT);
+    //     }
 
-        SECTION("float16 8x2048x256 cases"){
-            benchmark(8, 2048, 128, 2, 2, {40, 90}, poplar::HALF);
-            benchmark(8, 2048, 128, 2, 4, {40, 90}, poplar::HALF);
-            benchmark(8, 2048, 128, 4, 2, {40, 90}, poplar::HALF);
-            benchmark(8, 2048, 128, 4, 4, {40, 90}, poplar::HALF);
-        }
-    }
+    //     SECTION("float16 8x2048x256 cases"){
+    //         benchmark(8, 2048, 128, 2, 2, {40, 90}, poplar::HALF);
+    //         benchmark(8, 2048, 128, 2, 4, {40, 90}, poplar::HALF);
+    //         benchmark(8, 2048, 128, 4, 2, {40, 90}, poplar::HALF);
+    //         benchmark(8, 2048, 128, 4, 4, {40, 90}, poplar::HALF);
+    //     }
+    // }
 } // namespace

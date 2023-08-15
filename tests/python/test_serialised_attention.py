@@ -1,5 +1,4 @@
 from typing import Callable, Dict, Tuple
-from functools import partial
 
 import poptorch
 import torch
