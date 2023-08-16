@@ -4,11 +4,7 @@ def _load_native_library() -> None:
     import sysconfig
 
     root = pathlib.Path(__file__).parent.parent.absolute()
-<<<<<<< HEAD
-    name = "lib_flash_attention.so"
-=======
     name = "libflash_attention.so"
->>>>>>> 49f4bb5174e1243a0f95561b6de990fe89c44162
 
     paths = [
         root / "build" / name,
