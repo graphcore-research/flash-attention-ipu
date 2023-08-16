@@ -1,4 +1,4 @@
-cpppath = -Iflash_attention_ipu -isystem third_party/poplar/include -Ithird_party/catch2/extras
+cpppath = -Iflash_attention_ipu/cpp -isystem third_party/poplar/include -Ithird_party/catch2/extras
 cppflags = -Wall -Wextra -Werror -Wno-unused-function -std=c++14 -O2 -g -fPIC -fdiagnostics-color=always -DONNX_NAMESPACE=onnx
 linkflags = $cppflags -Wl,--no-undefined
 libs = -lpopart -lpopnn -lpoplin -lpopops -lpoprand -lpoputil -lpoplar
@@ -18,7 +18,7 @@ rule linkexe
 build build/obj/serialised_attention.o: compile flash_attention_ipu/cpp/serialised_attention.cpp
 
 # ...link
-build build/lib_flash_attention.so: linkso build/obj/serialised_attention.o
+build build/libflash_attention.so: linkso build/obj/serialised_attention.o
 
 
 # Tests

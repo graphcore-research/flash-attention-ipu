@@ -1,5 +1,4 @@
 from typing import Callable, Dict, Tuple
-from functools import partial
 
 import poptorch
 import torch
@@ -23,7 +22,6 @@ def run_forward(
     fn: Callable[..., Dict[str, torch.Tensor]],
     inputs: Dict[str, torch.Tensor],
     device: str,
-    patterns: Dict[str, bool] = {},
 ) -> Dict[str, torch.Tensor]:
     class TestModule(nn.Module):
         def __init__(self) -> None:
@@ -39,7 +37,6 @@ def run_forward(
     if device == "ipu":
         options = poptorch.Options()
         options.useIpuModel(not poptorch.ipuHardwareIsAvailable())
-        options._popart.setPatterns(patterns)
         step = poptorch.inferenceModel(module, options)
         output = step()
         step.copyWeightsToHost()
@@ -63,7 +60,9 @@ def test_serialised_attention(dtype, seq_len) -> None:
     )
 
     output_cpu = run_forward(
-        fn=lambda qkv: dict(out=attention_ref(qkv)), inputs=dict(qkv=qkv), device="cpu"
+        fn=lambda qkv: dict(out=serialised_attention(qkv, 1, 1)),
+        inputs=dict(qkv=qkv),
+        device="cpu",
     )
 
     atol = {torch.float32: 1e-4, torch.float16: 1e-2}[dtype]
