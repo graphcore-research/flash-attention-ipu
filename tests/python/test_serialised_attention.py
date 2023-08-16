@@ -9,15 +9,6 @@ from flash_attention_ipu import serialised_attention
 import pytest
 
 
-def attention_ref(qkv):
-    q, k, v = qkv
-    mask = torch.full((q.shape[1], q.shape[1]), -10000)
-    mask = torch.triu(mask, 1)
-    attn = q @ k.permute(0, 2, 1) + mask
-    attn = torch.nn.functional.softmax(attn, dim=-1)
-    return attn @ v
-
-
 def run_forward(
     fn: Callable[..., Dict[str, torch.Tensor]],
     inputs: Dict[str, torch.Tensor],
