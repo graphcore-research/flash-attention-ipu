@@ -44,7 +44,7 @@ def serialised_attention(
         q, k, v = qkv
         mask = torch.full((q.shape[1], q.shape[1]), -10000)
         mask = torch.triu(mask, 1)
-        attn = q @ k.permute(0, 2, 1)
+        attn = q @ k.permute(0, 2, 1) + mask
         attn = torch.nn.functional.softmax(attn, dim=-1)
         out = attn @ v
 

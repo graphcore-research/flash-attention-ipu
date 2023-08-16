@@ -185,62 +185,6 @@ poplar::Tensor vanillaAttention(
     return out;
 }
 
-poplar::Tensor vanillaAttentionGrad(
-    poplar::Graph& graph,
-    const poplar::Tensor& qkv, // shape 3 x G x L x D
-    const poplar::Tensor& grad, // shape G x L x D
-    poplar::program::Sequence& prog,
-    poplar::DebugContext& dc
-) {
-    assert(qkv.dim(0) == 3);
-    auto query = qkv[0];
-    auto key = qkv[1];
-    auto value = qkv[2];
-
-    /* 
-    Recompute attention 
-    */
-
-    // q @ k.T + mask
-    auto attn = poplin::matMulGrouped(graph, query, key.dimShuffle({0, 2, 1}), prog, query.elementType(), {dc, "attn = Q@K.T"});
-    
-    // generate causal masks
-    // clone attention matrix to colocate mask elements with attn matrix elements
-    auto mask = graph.clone(attn.elementType(), attn[0], {dc, "mask = array_like(attn[0])"});
-    popops::fill(graph, mask, prog, -10000.0, {dc, "fill(mask, -10000)"});
-    triu(graph, mask, 1, prog, {dc, "triu(mask)"});
-    popops::addInPlace(graph, attn, mask.expand({0}), prog, {dc, "attn += mask"});
-
-    // Stable softmax(x)
-    auto m = popops::reduce(graph, attn, attn.elementType(), {2}, {popops::Operation::MAX}, prog, {dc, "m = max(attn, dim=2)"});
-    popops::subInPlace(graph, attn, m.expand({2}), prog, {dc, "attn -= m"});
-    popops::expInPlace(graph, attn, prog, {dc, "attn = exp(attn)"});
-    auto s = popops::reduce(graph, attn, attn.elementType(), {2}, {popops::Operation::ADD}, prog, {dc, "s = sum(attn, dim=2)"});
-    popops::divInPlace(graph, attn, s.expand({2}), prog, {dc, "attn /= s"});
-
-    // Gradients!
-
-    // grad_v
-    auto value_grad = poplin::matMulGrouped(graph, attn.dimShuffle({0, 2, 1}), grad, prog, attn.elementType(), {dc, "dV = attn.T@dO"});
-    auto attn_grad = poplin::matMulGrouped(graph, grad, value.dimShuffle({0, 2, 1}), prog, grad.elementType(), {dc, "dattn = dO@V.T"});
-    
-    // softmax grad
-    popops::mulInPlace(graph, attn_grad, attn, prog, {dc, "dattn *= attn"});
-    s = popops::reduce(graph, attn_grad, attn_grad.elementType(), {2}, {popops::Operation::ADD}, prog, {dc, "s = sum(attn_grad, dim=2)"});
-    popops::mulInPlace(graph, attn, s.expand({2}), prog, {dc, "attn *= s"});
-    popops::subInPlace(graph, attn_grad, attn, prog, {dc, "dattn -= attn"});
-
-    // grad_q
-    auto query_grad = poplin::matMulGrouped(graph, attn_grad, key, prog, attn_grad.elementType(), {dc, "dQ = dattn @ K"});
-    // grad_k
-    auto key_grad = poplin::matMulGrouped(graph, attn_grad.dimShuffle({0, 2, 1}), query, prog, attn_grad.elementType(), {dc, "dK = dattn.T @ Q"});
-
-    // concat
-    auto qkv_grad = poplar::concat({query_grad.expand({0}), key_grad.expand({0}), value_grad.expand({0})}, 0);
-    
-    return qkv_grad;
-}
-
 poplar::Tensor serialisedAttention(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
@@ -276,46 +220,48 @@ poplar::Tensor serialisedAttention(
     auto out = graph.clone(query, {dc, "create_output"});
     popops::zero(graph, out, prog, {dc, "zero_output"});
 
-    // create tensors to store running logsumexp
-    auto logSumExp = popops::createSliceableTensor(graph, query.elementType(), {num_chunks_q, groups, chunkedQueryLen}, {0}, {1}, 4, "create_logsumexp_store");
-    popops::zero(graph, logSumExp, prog, {dc, "zero_logsumexp"});
+    // create tensors to store running softmax statistics
+    auto runningStats = popops::createSliceableTensor(graph, query.elementType(), {num_chunks_q, 2, groups, chunkedQueryLen}, {0}, {1}, 4, {dc, "create running softmax stats"});
 
-    // outer loop counter on q read
-    auto qCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_qCounter(i=0)"});
-    // inner loop counter on kv read
+    popops::zero(graph, runningStats.slice({0, 1}, 1), prog, {dc, "zero_running_sum"});
+    popops::fill(graph, runningStats.slice({1, 2}, 1), prog, -10000.0, "fill_running_max");
+    
+    // outer loop counter on kv read
     auto kvCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_kvCounter(j=0)"});
+    // inner loop counter on q read
+    auto qCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_qCounter(i=0)"});
     
     // gimme tiles
-    poputil::mapTensorLinearly(graph, qCounter);
     poputil::mapTensorLinearly(graph, kvCounter);
+    poputil::mapTensorLinearly(graph, qCounter);
 
-    popops::zero(graph, qCounter, prog, {dc, "zero_qCounter"});
     popops::zero(graph, kvCounter, prog, {dc, "zero_kvCounter"});
+    popops::zero(graph, qCounter, prog, {dc, "zero_qCounter"});
 
     // Setup repeat loops. Use whitespace indentation for python-like readability
 
     // kv loop body program
-    Sequence qLoopProg; {
+    Sequence kvLoopProg; {
         // slice k and v
-        auto qi = popops::dynamicSlice(graph, query, qCounter, {0}, {1}, qLoopProg, {dc, "q_i = q.at[i].get()"}).squeeze({0}); 
-        auto oi = popops::dynamicSlice(graph, out, qCounter, {0}, {1}, qLoopProg, {dc, "o_i = o.at[i].get()"}).squeeze({0});
-
-        auto li = popops::dynamicSlice(graph, logSumExp, qCounter, {0}, {1}, qLoopProg, {dc, "l_i = l.at[i].get()"}).squeeze({0});
-        auto mi = graph.clone(li, {dc, "m_i = array_like(l_i)"});
-        popops::fill(graph, mi, qLoopProg, -10000, {dc, "fill(m_i, -10000)"});
+        auto kj = popops::dynamicSlice(graph, key, kvCounter, {0}, {1}, kvLoopProg, {dc, "k_j = k.at[j].get()"}).squeeze({0});
+        auto vj = popops::dynamicSlice(graph, value, kvCounter, {0}, {1}, kvLoopProg, {dc, "v_j = v.at[j].get()"}).squeeze({0});
 
         // q loop body program
-        Sequence kvLoopProg; {
+        Sequence qLoopProg; {
             
             // Condition for executing (true) or skipping (false) block
-            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, kvLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];            
+            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, qLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];            
             
             // Conditional execute block program body
             Sequence doBlockProg; 
 
             // slice q, output, and softmax running stats
-            auto kj = popops::dynamicSlice(graph, key, kvCounter, {0}, {1}, doBlockProg, {dc, "k_j = k.at[j].get()"}).squeeze({0});
-            auto vj = popops::dynamicSlice(graph, value, kvCounter, {0}, {1}, doBlockProg, {dc, "v_j = v.at[j].get()"}).squeeze({0});
+            auto qi = popops::dynamicSlice(graph, query, qCounter, {0}, {1}, doBlockProg, {dc, "q_i = q.at[i].get()"}).squeeze({0}); 
+            auto oi = popops::dynamicSlice(graph, out, qCounter, {0}, {1}, doBlockProg, {dc, "o_i = o.at[i].get()"}).squeeze({0});             
+            
+            auto runningStatsi = popops::dynamicSlice(graph, runningStats, qCounter, {0}, {1}, doBlockProg, {dc, "get chunk stats"}).squeeze({0});
+            auto runningSumsi = runningStatsi.slice({0, 1}, 0).squeeze({0});
+            auto runningMaxsi = runningStatsi.slice({1, 2}, 0).squeeze({0});
 
             // compute qk^t
             auto t = poplin::matMulGrouped(graph, qi, kj.dimShuffle({0, 2, 1}), doBlockProg, kj.elementType(), {dc, "attn_ij = q_i @ k_j.T"});
@@ -367,98 +313,53 @@ poplar::Tensor serialisedAttention(
             doBlockProg.add(If(doMask, doMaskProg, skipMaskProg, {dc, "q@k.T + mask if i==j else q@k.T"}));
 
             // compute qk^T max for stable softmax
-            auto newMaxs = popops::reduce(graph, t, t.elementType(), {2}, {popops::Operation::MAX}, doBlockProg, {dc, "m_tmp = sum(attn_ij, dim=2)"});
-            newMaxs = popops::max(graph, mi, newMaxs, doBlockProg, {dc, "m_new = max(m_i, m_tmp)"});
-            auto c = popops::map(graph, pe::Exp(pe::_1 - pe::_2), {mi, newMaxs}, doBlockProg, {dc, "c = exp(m_i - m_new)"});
-            doBlockProg.add(Copy(newMaxs, mi));
-            
+            auto tmpMaxs = popops::reduce(graph, t, t.elementType(), {2}, {popops::Operation::MAX}, doBlockProg, {dc, "m_tmp = sum(attn_ij, dim=2)"});
             // subtract max from qk^T
-            popops::subInPlace(graph, t, newMaxs.expand({2}), doBlockProg, {dc, "attn_ij -= m_tmp"});
+            popops::subInPlace(graph, t, tmpMaxs.expand({2}), doBlockProg, {dc, "attn_ij -= m_tmp"});
             // compute softmax numerator: exp(qk^T - max)
             popops::expInPlace(graph, t, doBlockProg, {dc, "attn_ij = exp(attn_ij)"});
             
-            // compute sum exps
-            auto s = popops::reduce(graph, t, t.elementType(), {2}, {popops::Operation::ADD}, doBlockProg, {dc, "s = sum(attn_ij, dim=2)"});
-
             // compute running max update
-            auto newSums = popops::map(graph, pe::_1 * pe::_2 + pe::_3, {li, c, s}, doBlockProg, {dc, "l_new = l_i * c + s"});
-            doBlockProg.add(Copy(newSums, li));
+            auto newMaxs = popops::max(graph, runningMaxsi, tmpMaxs, doBlockProg, {dc, "m_new = max(m_i, m_tmp)"});
             
-            // compute output(o_i = (c*o_i + attn_ij @ v_j))
-            popops::mulInPlace(graph, oi, c.expand({2}), doBlockProg, {dc, "o_i *= c"});
+            // compute softmax update scaling factors
+            auto tmpSumScale = popops::map(graph, pe::Exp(pe::_1 - pe::_2), {tmpMaxs, newMaxs}, doBlockProg, {dc, "c_tmp = exp(m_tmp - m_new)"});
+            auto runningSumScale = popops::map(graph, pe::Exp(pe::_1 - pe::_2), {runningMaxsi, newMaxs}, doBlockProg, {dc, "c_i = exp(m_i - m_new)"});
+
+            // compute running sum update
+            auto newSums = popops::reduce(graph, t, t.elementType(), {2}, {popops::Operation::ADD}, doBlockProg, {dc, "s_new = sum(attn_ij, dim=2)"});
+            
+            // scale updates from past statistics
+            popops::mulInPlace(graph, runningSumsi, runningSumScale, doBlockProg, {dc, "s_i *= c_i"});
+            newSums = popops::map(graph, pe::_1*pe::_2 + pe::_3, {newSums, tmpSumScale, runningSumsi}, doBlockProg, {dc, "s_new = s_new * c_tmp + s_i"});
+
+            // compute output(o_i = (s_i*o_i + c_tmp*attn_ij @ v_j)/ s_new)
+            popops::mulInPlace(graph, oi, runningSumsi.expand({2}), doBlockProg, {dc, "o_i *= s_i"});
+            popops::mulInPlace(graph, t, tmpSumScale.expand({2}), doBlockProg, {dc, "attn_ij *= c_tmp"});
             poplin::matMulGroupedAcc(graph, oi, 1.0, t, vj, doBlockProg, {dc, "o_i += attn_ij @ v_j"});
+            popops::divInPlace(graph, oi, newSums.expand({2}), doBlockProg, {dc, "o_i /= s_new"});
+
+            // update output and running softmax stats
+            popops::dynamicUpdate(graph, out, oi.expand({0}), qCounter, {0}, {1}, doBlockProg, {dc, "o = o.at[i].set(o_i)"});
+            popops::dynamicUpdate(graph, runningStats, poplar::concat(newSums.expand({0}), newMaxs.expand({0})).expand({0}), qCounter, {0}, {1}, doBlockProg, {dc, "update chunk stats"});
             
             Sequence skipBlockProg;
-            kvLoopProg.add(If(doBlock, doBlockProg, skipBlockProg));
+            qLoopProg.add(If(doBlock, doBlockProg, skipBlockProg));
 
-            // update kv loop counter
-            popops::mapInPlace(graph, pe::_1 + 1, {kvCounter}, kvLoopProg, {dc, "j+=1"});
+            popops::mapInPlace(graph, pe::_1 + 1, {qCounter}, qLoopProg, {dc, "i+=1"});
+            // update q loop counter
         }
-        // repeat kv loop body in q loop body
-        qLoopProg.add(Repeat(key.dim(0), kvLoopProg, {dc, "serialised_attention_inner_loop_repeat"}));
-        
-        popops::divInPlace(graph, oi, li.expand({2}), qLoopProg, {dc, "o_i /= l_i"});
-        li = popops::map(graph, pe::_1 + pe::Log(pe::_2), {mi, li}, qLoopProg, {dc, "l_i = m_i + log(l_i)"});
-        
-        // update output and running softmax stats
-        popops::dynamicUpdate(graph, out, oi.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "o = o.at[i].set(o_i)"});
-        popops::dynamicUpdate(graph, logSumExp, li.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "update logSumExp"});
-
-        // update q loop counter
-        popops::mapInPlace(graph, pe::_1 + 1, {qCounter}, qLoopProg, {dc, "i+=1"});
-        // reset kv loop counter
-        popops::zero(graph, kvCounter, qLoopProg, {dc, "j=0"});
+        // repeat q loop body in kv loop body
+        kvLoopProg.add(Repeat(query.dim(0), qLoopProg, {dc, "serialised_attention_inner_loop_repeat"}));
+        // update kv loop counter
+        popops::mapInPlace(graph, pe::_1 + 1, {kvCounter}, kvLoopProg, {dc, "j+=1"});
+        // reset q loop counter
+        popops::zero(graph, qCounter, kvLoopProg, {dc, "i=0"});
     }
-    prog.add(Repeat(query.dim(0), qLoopProg, {dc, "serialised_attention_outer_loop_repeat"}));
+    prog.add(Repeat(key.dim(0), kvLoopProg, {dc, "serialised_attention_outer_loop_repeat"}));
 
     out = out.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
     return out;
-}
-
-poplar::Tensor serialisedAttentionGrad(
-    poplar::Graph& graph,
-    const poplar::Tensor& qkv, // Shape 3 x G x L x D
-    const poplar::Tensor& grad, // Shape G x L x D
-    uint32_t num_chunks_q,
-    uint32_t num_chunks_kv,
-    poplar::program::Sequence& prog,
-    const poplar::DebugContext& dc) {
-
-    auto out_rec = serialisedAttention(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "recompute_output"});
-
-    assert(qkv.dim(0) == 3);
-
-    // get shape data
-    auto groups = qkv.dim(1); // groups = batch_size * num_heads
-    auto seqLen = qkv.dim(2);
-    auto headDim = qkv.dim(3);
-    
-    assert(seqLen % num_chunks_q == 0);
-    assert(seqLen % num_chunks_kv == 0);
-
-    // compute sizes of chunked sequence length
-    auto chunkedQueryLen = seqLen / num_chunks_q; 
-    auto chunkedKVLen = seqLen / num_chunks_kv; 
-
-    // Unpack q,k,v and copy data to sliceable tensors with nice tile mappings
-    auto query = popops::createSliceableTensor(graph, qkv.elementType(), {num_chunks_q, groups, chunkedQueryLen, headDim}, {0}, {1}, 4, {dc, "create_query"});
-    auto key = popops::createSliceableTensor(graph, qkv.elementType(), {num_chunks_kv, groups, chunkedKVLen, headDim}, {0}, {1}, 4, {dc, "create_key"});
-    auto value = popops::createSliceableTensor(graph, qkv.elementType(), {num_chunks_kv, groups, chunkedKVLen, headDim}, {0}, {1}, 4, {dc, "create_value"});
-    auto out = popops::createSliceableTensor(graph, out_rec.elementType(), {num_chunks_q, groups, chunkedQueryLen, headDim}, {0}, {1}, 4, {"create_output"});
-
-    prog.add(Copy(qkv[0].reshape({groups, num_chunks_q, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), query));
-    prog.add(Copy(qkv[1].reshape({groups, num_chunks_kv, chunkedKVLen, headDim}).dimShuffle({1, 0, 2, 3}), key));
-    prog.add(Copy(qkv[2].reshape({groups, num_chunks_kv, chunkedKVLen, headDim}).dimShuffle({1, 0, 2, 3}), value));
-    prog.add(Copy(out_rec.reshape({groups, num_chunks_kv, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), out));
-
-    auto query_grad = graph.clone(query, {dc, "dquery = array_like(query)"});
-    auto key_grad = graph.clone(key, {dc, "dkey = array_like(key)"});
-    auto value_grad = graph.clone(value, {dc, "dvalue = array_like(value)"});
-
-    popops::zero(graph, query_grad, prog, {dc, "zero_dquery"});
-    popops::zero(graph, key_grad, prog, {dc, "zero_dkey"});
-    popops::zero(graph, value_grad, prog, {dc, "zero_dvalue"});
-
 }
 
 // popart
