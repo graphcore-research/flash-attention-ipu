@@ -1,4 +1,3 @@
-#include <poplar/Engine.hpp>
 #include <poplar/Graph.hpp>
 #include <poplar/DeviceManager.hpp>
 #include <poplar/Tensor.hpp>
@@ -22,7 +21,16 @@
 #include <poplin/codelets.hpp>
 #include <popops/codelets.hpp>
 #include <popnn/codelets.hpp>
-#include <poprand/codelets.hpp>
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#include <popart/op.hpp>
+#include <popart/opmanager.hpp>
+#include <popart/opserialiser.hpp>
+#include <popart/popx/opx.hpp>
+#include <popart/popx/opxmanager.hpp>
+#pragma GCC diagnostic pop
 
 #include <iostream>
 #include <algorithm>
@@ -353,3 +361,89 @@ poplar::Tensor serialisedAttention(
     out = out.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
     return out;
 }
+
+// popart
+
+const popart::OperatorIdentifier SerialisedAttentionId = {"ai.graphcore", "SerialisedAttention", 1};
+
+class SerialisedAttentionOp;
+
+class SerialisedAttentionOp : public popart::Op {
+    public:
+    SerialisedAttentionOp(
+        const popart::OperatorIdentifier& _opid,
+        unsigned _num_chunks_q,
+        unsigned _num_chunks_kv,
+        const popart::Op::Settings& settings_
+    ) : popart::Op(_opid, settings_), num_chunks_q(_num_chunks_q), num_chunks_kv(_num_chunks_kv) {}
+
+    std::unique_ptr<Op> clone() const final { return std::make_unique<SerialisedAttentionOp>(*this); }
+
+    void setup() final {
+        auto qkvInfo = inInfo(0);
+        assert(qkvInfo.rank() == 4);
+        assert(qkvInfo.dim(0) == 3);
+
+        outInfo(0) = popart::TensorInfo(qkvInfo.dataType(), {qkvInfo.dim(1), qkvInfo.dim(2), qkvInfo.dim(3)});
+    }
+
+    void appendAttributes(popart::OpSerialiserBase& os) const override {
+        popart::Op::appendAttributes(os);
+        os.appendAttribute("num_chunks_q", getNumChunksQ());
+        os.appendAttribute("num_chunks_kv", getNumChunksKV());
+    }
+
+    void appendOutlineAttributes(popart::OpSerialiserBase& os) const override {
+        Op::appendOutlineAttributes(os);
+        os.appendAttribute("num_chunks_q", getNumChunksQ());
+        os.appendAttribute("num_chunks_kv", getNumChunksKV());
+    }
+
+    float getSubgraphValue() const final { return getHighSubgraphValue(); }
+
+    bool requiresRandomSeed() const override { return false; }
+
+    unsigned getNumChunksQ() const {return num_chunks_q; }
+    unsigned getNumChunksKV() const {return num_chunks_kv; }
+
+    private:
+    unsigned num_chunks_q;
+    unsigned num_chunks_kv;
+
+};
+
+static popart::OpDefinition::DataTypes T = {popart::DataType::FLOAT16, popart::DataType::FLOAT};
+
+static popart::OpDefinition 
+    SerialisedAttentionOpDef({
+        popart::OpDefinition::Inputs({{"qkv", T}}),
+        popart::OpDefinition::Outputs({{"output", T}}),
+        popart::OpDefinition::Attributes({{"num_chunks_q", {"int"}}, {"num_chunks_kv", {"int"}}})
+    });
+
+static popart::OpCreator<SerialisedAttentionOp> SerialisedAttentionOpCreator(
+    popart::OpDefinitions({{SerialisedAttentionId, SerialisedAttentionOpDef}}),
+    [](const popart::OpCreatorInfo& info) {
+        auto num_chunks_q = unsigned(info.attributes.getAttribute<popart::Attributes::Int>("num_chunks_q", 1u));
+        auto num_chunks_kv = unsigned(info.attributes.getAttribute<popart::Attributes::Int>("num_chunks_kv", 1u));
+        return std::make_unique<SerialisedAttentionOp>(info.opid, num_chunks_q, num_chunks_kv, info.settings);
+    },
+    true);
+
+class SerialisedAttentionOpx : public popart::popx::Opx {
+    public:
+    SerialisedAttentionOpx(popart::Op* op, popart::popx::Devicex* devicex) : popart::popx::Opx(op, devicex) {
+        verifyOp<SerialisedAttentionOp>(op, {SerialisedAttentionId});
+    }
+
+    void grow(poplar::program::Sequence& prog) const final {
+        auto op = getOp<SerialisedAttentionOp>();
+        poplar::Tensor qkv = getInTensor(0);
+        auto num_chunks_q = op.getNumChunksQ();
+        auto num_chunks_kv = op.getNumChunksKV();
+        poplar::Tensor out = serialisedAttention(graph(), qkv, num_chunks_q, num_chunks_kv, prog, "attention");
+        setOutTensor(0, out);
+    }
+};
+
+static popart::popx::OpxCreator<SerialisedAttentionOpx> SerialisedAttentionOpxCreator({SerialisedAttentionId});

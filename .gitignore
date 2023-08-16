@@ -1,4 +1,9 @@
 .idea/
 build/
+__pycache__/
+.vscode/
+.mypy_cache/
+third_party/poplar
+third_party/popart
 
 .ninja_*
