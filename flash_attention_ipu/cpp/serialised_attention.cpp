@@ -246,13 +246,13 @@ poplar::Tensor serialisedAttention(
 
         auto li = popops::dynamicSlice(graph, logSumExp, qCounter, {0}, {1}, qLoopProg, {dc, "l_i = l.at[i].get()"}).squeeze({0});
         auto mi = graph.clone(li, {dc, "m_i = array_like(l_i)"});
-        popops::fill(graph, mi, prog, -10000, {dc, "fill(m_i, -10000)"});
+        popops::fill(graph, mi, qLoopProg, -10000, {dc, "fill(m_i, -10000)"});
 
         // q loop body program
         Sequence kvLoopProg; {
             
             // Condition for executing (true) or skipping (false) block
-            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, qLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];            
+            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, kvLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];            
             
             // Conditional execute block program body
             Sequence doBlockProg; 
@@ -313,6 +313,8 @@ poplar::Tensor serialisedAttention(
             // compute qk^T max for stable softmax
             auto newMaxs = popops::reduce(graph, t, t.elementType(), {2}, {popops::Operation::MAX}, doBlockProg, {dc, "m_tmp = sum(attn_ij, dim=2)"});
             newMaxs = popops::max(graph, mi, newMaxs, doBlockProg, {dc, "m_new = max(m_i, m_tmp)"});
+            auto c = popops::map(graph, pe::Exp(pe::_1 - pe::_2), {mi, newMaxs}, doBlockProg, {dc, "c = exp(m_i - m_new)"});
+            doBlockProg.add(Copy(newMaxs, mi));
             
             // subtract max from qk^T
             popops::subInPlace(graph, t, newMaxs.expand({2}), doBlockProg, {dc, "attn_ij -= m_tmp"});
@@ -321,14 +323,13 @@ poplar::Tensor serialisedAttention(
             
             // compute sum exps
             auto s = popops::reduce(graph, t, t.elementType(), {2}, {popops::Operation::ADD}, doBlockProg, {dc, "s = sum(attn_ij, dim=2)"});
-            auto c = popops::map(graph, pe::Exp(pe::_1 - pe::_2), {mi, newMaxs}, doBlockProg, {dc, "c = exp(m_i - m_new)"});
-            doBlockProg.add(Copy(newMaxs, mi));
-            
+
             // compute running max update
-            li = popops::map(graph, pe::_1 * pe::_3 + pe::_4, {c, li, s}, doBlockProg, {dc, "l_i = c * l_i + s"});
+            auto newSums = popops::map(graph, pe::_1 * pe::_2 + pe::_3, {li, c, s}, doBlockProg, {dc, "l_new = l_i * c + s"});
+            doBlockProg.add(Copy(newSums, li));
             
-            // compute output(o_i = (o_i/c + attn_ij @ v_j))
-            popops::divInPlace(graph, oi, c.expand({2}), doBlockProg, {dc, "o_i /= c"});
+            // compute output(o_i = (c*o_i + attn_ij @ v_j))
+            popops::mulInPlace(graph, oi, c.expand({2}), doBlockProg, {dc, "o_i *= c"});
             poplin::matMulGroupedAcc(graph, oi, 1.0, t, vj, doBlockProg, {dc, "o_i += attn_ij @ v_j"});
             
             Sequence skipBlockProg;
@@ -338,7 +339,7 @@ poplar::Tensor serialisedAttention(
             popops::mapInPlace(graph, pe::_1 + 1, {kvCounter}, kvLoopProg, {dc, "j+=1"});
         }
         // repeat kv loop body in q loop body
-        qLoopProg.add(Repeat(key.dim(0), qLoopProg, {dc, "serialised_attention_inner_loop_repeat"}));
+        qLoopProg.add(Repeat(key.dim(0), kvLoopProg, {dc, "serialised_attention_inner_loop_repeat"}));
         
         popops::divInPlace(graph, oi, li.expand({2}), qLoopProg, {dc, "o_i /= l_i"});
         li = popops::map(graph, pe::_1 + pe::Log(pe::_2), {mi, li}, qLoopProg, {dc, "l_i = m_i + log(l_i)"});
