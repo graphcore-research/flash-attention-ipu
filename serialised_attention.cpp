@@ -162,7 +162,6 @@ poplar::Tensor vanillaAttention(
 
     // q @ k.T + mask
     auto attn = poplin::matMulGrouped(graph, query, key.dimShuffle({0, 2, 1}), prog, query.elementType(), {dc, "attn = Q@K.T"});
-    // prog.add(program::PrintTensor("scores", attn));
 
     // generate causal masks
     // clone attention matrix to colocate mask elements with attn matrix elements
@@ -170,23 +169,16 @@ poplar::Tensor vanillaAttention(
     popops::fill(graph, mask, prog, -10000.0, {dc, "fill(mask, -10000)"});
     triu(graph, mask, 1, prog, {dc, "triu(mask)"});
     popops::addInPlace(graph, attn, mask.expand({0}), prog, {dc, "attn += mask"});
-    // prog.add(program::PrintTensor("scores+mask", attn));
 
     // Stable softmax(x)
     auto m = popops::reduce(graph, attn, attn.elementType(), {2}, {popops::Operation::MAX}, prog, {dc, "m = max(attn, dim=2)"});
-    // prog.add(program::PrintTensor("max", m));
     popops::subInPlace(graph, attn, m.expand({2}), prog, {dc, "attn -= m"});
     popops::expInPlace(graph, attn, prog, {dc, "attn = exp(attn)"});
-    // prog.add(program::PrintTensor("energy", attn));
     auto s = popops::reduce(graph, attn, attn.elementType(), {2}, {popops::Operation::ADD}, prog, {dc, "s = sum(attn, dim=2)"});
-    // prog.add(program::PrintTensor("denom", m));
-    // popops::divInPlace(graph, attn, s.expand({2}), prog, {dc, "attn /= s"});
 
     // attn @ v
     auto out = poplin::matMulGrouped(graph, attn, value, prog, value.elementType(), {dc, "out = attn@V"});
-    // prog.add(program::PrintTensor("out_pre", out));
     popops::divInPlace(graph, out, s.expand({2}), prog, {dc, "out /= s"});
-    // prog.add(program::PrintTensor("out", out));
     return out;
 }
 
@@ -268,7 +260,6 @@ poplar::Tensor serialisedAttention(
 
             // compute qk^t
             auto t = poplin::matMulGrouped(graph, qi, kj.dimShuffle({0, 2, 1}), doBlockProg, kj.elementType(), {dc, "attn_ij = q_i @ k_j.T"});
-            // doBlockProg.add(program::PrintTensor("scores_ij", t));
             
             // Condition for making mask
             auto doMakeMasks = popops::map(graph, (pe::_1 == 0) && (pe::_2 == 0), {qCounter, kvCounter}, doBlockProg, {dc, "i==0 and j==0"})[0];
@@ -315,37 +306,28 @@ poplar::Tensor serialisedAttention(
 
             // Add conditional mask program to execute block program 
             doBlockProg.add(If(doMask, doMaskProg, skipMaskProg, {dc, "q@k.T + mask if i==j else q@k.T"}));
-            // doBlockProg.add(program::PrintTensor("scores_ij+mask_ij", t));
 
             // compute qk^T max for stable softmax
             auto newMaxs = popops::reduce(graph, t, t.elementType(), {2}, {popops::Operation::MAX}, doBlockProg, {dc, "m_tmp = sum(attn_ij, dim=2)"});
             newMaxs = popops::max(graph, mi, newMaxs, doBlockProg, {dc, "m_new = max(m_i, m_tmp)"});
             auto c = popops::map(graph, pe::Exp(pe::_1 - pe::_2), {mi, newMaxs}, doBlockProg, {dc, "c = exp(m_i - m_new)"});
             doBlockProg.add(Copy(newMaxs, mi));
-            // doBlockProg.add(program::PrintTensor("max", mi));
             
             // subtract max from qk^T
             popops::subInPlace(graph, t, newMaxs.expand({2}), doBlockProg, {dc, "attn_ij -= m_tmp"});
             // compute softmax numerator: exp(qk^T - max)
             popops::expInPlace(graph, t, doBlockProg, {dc, "attn_ij = exp(attn_ij)"});
-            // doBlockProg.add(program::PrintTensor("energy_ij", t));
             
             // compute sum exps
             auto s = popops::reduce(graph, t, t.elementType(), {2}, {popops::Operation::ADD}, doBlockProg, {dc, "s = sum(attn_ij, dim=2)"});
 
-            // doBlockProg.add(program::PrintTensor("s", s));
-            // doBlockProg.add(program::PrintTensor("c", c));
-            // doBlockProg.add(program::PrintTensor("denom_pre", li));
-
             // compute running max update
             auto newSums = popops::map(graph, pe::_1 * pe::_2 + pe::_3, {li, c, s}, doBlockProg, {dc, "l_new = l_i * c + s"});
             doBlockProg.add(Copy(newSums, li));
-            // doBlockProg.add(program::PrintTensor("denom", li));
             
             // compute output(o_i = (c*o_i + attn_ij @ v_j))
             popops::mulInPlace(graph, oi, c.expand({2}), doBlockProg, {dc, "o_i *= c"});
             poplin::matMulGroupedAcc(graph, oi, 1.0, t, vj, doBlockProg, {dc, "o_i += attn_ij @ v_j"});
-            // doBlockProg.add(program::PrintTensor("out_pre", oi));
             
             Sequence skipBlockProg;
             kvLoopProg.add(If(doBlock, doBlockProg, skipBlockProg));
@@ -357,7 +339,6 @@ poplar::Tensor serialisedAttention(
         qLoopProg.add(Repeat(key.dim(0), kvLoopProg, {dc, "serialised_attention_inner_loop_repeat"}));
         
         popops::divInPlace(graph, oi, li.expand({2}), qLoopProg, {dc, "o_i /= l_i"});
-        // qLoopProg.add(program::PrintTensor("out", oi));
         li = popops::map(graph, pe::_1 + pe::Log(pe::_2), {mi, li}, qLoopProg, {dc, "l_i = m_i + log(l_i)"});
         
         // update output and running softmax stats
