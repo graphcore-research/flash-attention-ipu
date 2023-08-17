@@ -310,10 +310,10 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
         Sequence kvLoopProg; {
             
             // Condition for executing (true) or skipping (false) block
-            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, kvLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];            
+            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, kvLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];
             
             // Conditional execute block program body
-            Sequence doBlockProg; 
+            Sequence doBlockProg;
 
             // slice q, output, and softmax running stats
             auto kj = popops::dynamicSlice(graph, key, kvCounter, {0}, {1}, doBlockProg, {dc, "k_j = k.at[j].get()"}).squeeze({0});
@@ -499,24 +499,81 @@ poplar::Tensor serialisedAttentionGrad(
         auto dvj = popops::dynamicSlice(graph, value_grad, kvCounter, {0}, {1}, kvLoopProg, {dc, "dv_j = dv.at[j].get()"}).squeeze({0});
 
         Sequence qLoopProg; {
-            auto qi = popops::dynamicSlice(graph, query, qCounter, {0}, {1}, qLoopProg, {dc, "q_i = q.at[i].get()"}).squeeze({0});
-            auto dqi = popops::dynamicSlice(graph, query_grad, qCounter, {0}, {1}, qLoopProg, {dc, "dq_i = dq.at[i].get()"}).squeeze({0});
-            auto doi = popops::dynamicSlice(graph, grad, qCounter, {0}, {1}, qLoopProg, {dc, "do_i = do.at[i].get()"}).squeeze({0});
-            auto li = popops::dynamicSlice(graph, logSumExp, qCounter, {0}, {1}, qLoopProg, {dc, "lse_i = lse.at[i].get()"}).squeeze({0});
-            auto si = popops::dynamicSlice(graph, sumOutXGrad, qCounter, {0}, {1}, qLoopProg, {dc, "s_i = s.at[i].get()"}).squeeze({0});
 
-            auto t = poplin::matMulGrouped(graph, qi, kj.dimShuffle({0, 2, 1}), qLoopProg, kj.elementType(), {dc, "attn_ij = q_i @ k_j.T"});
-            popops::subInPlace(graph, t, li.expand({2}), qLoopProg, {dc, "attn_ij -= li"});
-            popops::expInPlace(graph, t, qLoopProg, "attn_ij = exp(att_ij)");
+            // Condition for executing (true) or skipping (false) block
+            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, kvLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];
 
-            poplin::matMulGroupedAcc(graph, dvj, 1.0, t.dimShuffle({0, 2, 1}), doi, qLoopProg, {dc, "dv_j += attn_ij.T @ do_i"});
+            // Conditional execute block program body
+            Sequence doBlockProg; 
+
+            auto qi = popops::dynamicSlice(graph, query, qCounter, {0}, {1}, doBlockProg, {dc, "q_i = q.at[i].get()"}).squeeze({0});
+            auto dqi = popops::dynamicSlice(graph, query_grad, qCounter, {0}, {1}, doBlockProg, {dc, "dq_i = dq.at[i].get()"}).squeeze({0});
+            auto doi = popops::dynamicSlice(graph, grad, qCounter, {0}, {1}, doBlockProg, {dc, "do_i = do.at[i].get()"}).squeeze({0});
+            auto li = popops::dynamicSlice(graph, logSumExp, qCounter, {0}, {1}, doBlockProg, {dc, "lse_i = lse.at[i].get()"}).squeeze({0});
+            auto si = popops::dynamicSlice(graph, sumOutXGrad, qCounter, {0}, {1}, doBlockProg, {dc, "s_i = s.at[i].get()"}).squeeze({0});
+
+            auto t = poplin::matMulGrouped(graph, qi, kj.dimShuffle({0, 2, 1}), doBlockProg, kj.elementType(), {dc, "attn_ij = q_i @ k_j.T"});
             
-            auto dt = poplin::matMulGrouped(graph, doi, vj.dimShuffle({0, 2, 1}), qLoopProg, doi.elementType(), {dc, "dattn_ij = do_i @ v_j.T"});
-            popops::subInPlace(graph, dt, si.expand({2}), qLoopProg, {dc, "dattn_ij -= s_i"});
-            popops::mulInPlace(graph, dt, t, qLoopProg, {dc, "dattn_ij *= attn_ij"});
+            // Condition for making mask
+            auto doMakeMasks = popops::map(graph, (pe::_1 == 0) && (pe::_2 == 0), {qCounter, kvCounter}, doBlockProg, {dc, "i==0 and j==0"})[0];
+            
+            // generate causal masks
+            // clone attention matrix block to colocate mask block elements with attn matrix block elements
+            Sequence doMakeMasksProg;
+            std::vector<int32_t> offsets = getTriuOffsetSequence(chunkedQueryLen, chunkedKVLen);
+            // use cloneN to generate as many as needed by offsets.size()
+            auto masks = graph.cloneN(t.elementType(), t[0], offsets.size(), {dc, "masks = repeat(array_like(t[0]), offsets.size())"});
+            popops::fill(graph, masks, doMakeMasksProg, -10000.0, {dc, "fill(masks, -10000.0)"});
+            // Triu function above didn't work when passing a slice of a tensor, so it is inlined here
+            for (size_t i = 0; i < offsets.size(); ++i){
+                int k = offsets[i];
+                int m = masks.dim(masks.rank() - 2);
+                int n = masks.dim(masks.rank() - 1);
 
-            poplin::matMulGroupedAcc(graph, dqi, 1.0, dt, kj, qLoopProg, {dc, "dq_i += dattn_ij @ k_j"});
-            poplin::matMulGroupedAcc(graph, dkj, 1.0, dt.dimShuffle({0, 2, 1}), qi, qLoopProg, {dc, "dk_j += dattn_ij.T @ q_i"});
+                size_t start = 0;
+                for (int j = m; j > 0 && j-1+k > 0; --j){
+                    size_t end = size_t(std::min(j-1+k, n));
+                    popops::zero(graph, masks.slice({i, size_t(j-1), start}, {i+1, size_t(j), end}), doMakeMasksProg, {dc, "zero_for_triu(masks)"});
+                    }
+            }
+            // mask counter on masked block execution
+            auto maskCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_maskCounter(k=0)"});
+            poputil::mapTensorLinearly(graph, maskCounter);
+            popops::zero(graph, maskCounter, doMakeMasksProg, {dc, "zero_maskCounter"});
+
+            Sequence skipMakeMasksProg;
+            doBlockProg.add(If(doMakeMasks, doMakeMasksProg, skipMakeMasksProg, {dc, "initialise_masks"}));
+
+            // Condition for adding mask to q@k.T
+            auto doMask = popops::map(graph, (pe::_1 * uint(chunkedQueryLen) < ((pe::_2 + 1) * uint(chunkedKVLen) - 1)), {qCounter, kvCounter}, doBlockProg, {dc, "i * q_chunk_size < (j+1) * kv_chunk_size - 1"})[0];
+            
+            // Conditional add mask program body
+            Sequence doMaskProg; 
+            auto blockMask = popops::dynamicSlice(graph, masks, maskCounter, {0}, {1}, doMaskProg, {dc, "get_mask"}).squeeze({0});
+            popops::addInPlace(graph, t, blockMask.expand({0}), doMaskProg, {dc, "attn_ij += mask_ij"});
+            // update mask counter
+            popops::mapInPlace(graph, ((pe::_1 + 1)%uint(masks.dim(0))), {maskCounter}, doMaskProg, {dc, "k = (k+1)%masks.size()"});
+
+            // Empty skip mask program
+            Sequence skipMaskProg;
+
+            // Add conditional mask program to execute block program 
+            doBlockProg.add(If(doMask, doMaskProg, skipMaskProg, {dc, "q@k.T + mask if i==j else q@k.T"}));
+            
+            popops::subInPlace(graph, t, li.expand({2}), doBlockProg, {dc, "attn_ij -= li"});
+            popops::expInPlace(graph, t, doBlockProg, "attn_ij = exp(att_ij)");
+
+            poplin::matMulGroupedAcc(graph, dvj, 1.0, t.dimShuffle({0, 2, 1}), doi, doBlockProg, {dc, "dv_j += attn_ij.T @ do_i"});
+            
+            auto dt = poplin::matMulGrouped(graph, doi, vj.dimShuffle({0, 2, 1}), doBlockProg, doi.elementType(), {dc, "dattn_ij = do_i @ v_j.T"});
+            popops::subInPlace(graph, dt, si.expand({2}), doBlockProg, {dc, "dattn_ij -= s_i"});
+            popops::mulInPlace(graph, dt, t, doBlockProg, {dc, "dattn_ij *= attn_ij"});
+            
+            poplin::matMulGroupedAcc(graph, dqi, 1.0, dt, kj, doBlockProg, {dc, "dq_i += dattn_ij @ k_j"});
+            poplin::matMulGroupedAcc(graph, dkj, 1.0, dt.dimShuffle({0, 2, 1}), qi, doBlockProg, {dc, "dk_j += dattn_ij.T @ q_i"});
+            
+            Sequence skipBlockProg;
+            qLoopProg.add(If(doBlock, doBlockProg, skipBlockProg));
 
             popops::dynamicUpdate(graph, query_grad, dqi.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "dq = dq.at[i].set(dq_i"});
             popops::mapInPlace(graph, pe::_1 + 1, {qCounter}, qLoopProg, {dc, "i+=1"});
@@ -590,7 +647,6 @@ class SerialisedAttentionOp : public popart::Op {
     private:
     unsigned num_chunks_q;
     unsigned num_chunks_kv;
-
 };
 
 static popart::OpDefinition::DataTypes T = {popart::DataType::FLOAT16, popart::DataType::FLOAT};
