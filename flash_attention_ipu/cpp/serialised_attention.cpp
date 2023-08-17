@@ -190,7 +190,7 @@ poplar::Tensor vanillaAttentionGrad(
     const poplar::Tensor& qkv, // shape 3 x G x L x D
     const poplar::Tensor& grad, // shape G x L x D
     poplar::program::Sequence& prog,
-    poplar::DebugContext& dc) 
+    const poplar::DebugContext& dc) 
     {
     assert(qkv.dim(0) == 3);
     auto query = qkv[0];
@@ -442,7 +442,7 @@ poplar::Tensor serialisedAttentionGrad(
     const poplar::DebugContext& dc) {
 
     auto out_tensors = serialisedAttentionImpl(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "recompute_output"});
-    auto out_rec = out_tensors[0];
+    auto out = out_tensors[0];
     auto logSumExp = out_tensors[1];
     assert(qkv.dim(0) == 3);
 
@@ -457,17 +457,22 @@ poplar::Tensor serialisedAttentionGrad(
     // compute sizes of chunked sequence length
     auto chunkedQueryLen = seqLen / num_chunks_q; 
     auto chunkedKVLen = seqLen / num_chunks_kv; 
+    
+    popops::mulInPlace(graph, out, grad, prog, {dc, "D = out * grad"});
+    auto sumOutXGradUnmapped = popops::reduce(graph, out, out.elementType(), {2}, {popops::Operation::ADD}, prog, {dc, "s=sum(D)"});
+    auto sumOutXGrad = graph.clone(logSumExp);
+    prog.add(Copy(sumOutXGradUnmapped.reshape({groups, num_chunks_q, chunkedQueryLen}).dimShuffle({1, 0, 2}), sumOutXGrad));
 
     // Unpack q,k,v and copy data to sliceable tensors with nice tile mappings
     auto query = popops::createSliceableTensor(graph, qkv.elementType(), {num_chunks_q, groups, chunkedQueryLen, headDim}, {0}, {1}, 4, {dc, "create_query"});
     auto key = popops::createSliceableTensor(graph, qkv.elementType(), {num_chunks_kv, groups, chunkedKVLen, headDim}, {0}, {1}, 4, {dc, "create_key"});
     auto value = popops::createSliceableTensor(graph, qkv.elementType(), {num_chunks_kv, groups, chunkedKVLen, headDim}, {0}, {1}, 4, {dc, "create_value"});
-    auto out = popops::createSliceableTensor(graph, out_rec.elementType(), {num_chunks_q, groups, chunkedQueryLen, headDim}, {0}, {1}, 4, {"create_output"});
+    auto out_grad = popops::createSliceableTensor(graph, grad.elementType(), {num_chunks_q, groups, chunkedQueryLen, headDim}, {0}, {1}, 4, {"create_grad"});
 
     prog.add(Copy(qkv[0].reshape({groups, num_chunks_q, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), query));
     prog.add(Copy(qkv[1].reshape({groups, num_chunks_kv, chunkedKVLen, headDim}).dimShuffle({1, 0, 2, 3}), key));
     prog.add(Copy(qkv[2].reshape({groups, num_chunks_kv, chunkedKVLen, headDim}).dimShuffle({1, 0, 2, 3}), value));
-    prog.add(Copy(out_rec.reshape({groups, num_chunks_kv, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), out));
+    prog.add(Copy(grad.reshape({groups, num_chunks_kv, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), out_grad));
 
     auto query_grad = graph.clone(query, {dc, "dquery = array_like(query)"});
     auto key_grad = graph.clone(key, {dc, "dkey = array_like(key)"});
@@ -489,9 +494,6 @@ poplar::Tensor serialisedAttentionGrad(
     popops::zero(graph, kvCounter, prog, {dc, "zero_kvCounter"});
     popops::zero(graph, qCounter, prog, {dc, "zero_qCounter"});
 
-    popops::mulInPlace(graph, out, grad, prog, {dc, "D = out * grad"});
-    auto sumOutXGrad = popops::reduce(graph, out, out.elementType(), {2}, {popops::Operation::ADD}, prog, {dc, "s=sum(D)"});
-
     Sequence kvLoopProg; {
         auto kj = popops::dynamicSlice(graph, key, kvCounter, {0}, {1}, kvLoopProg, {dc, "k_j = k.at[j].get()"}).squeeze({0});
         auto dkj = popops::dynamicSlice(graph, key_grad, kvCounter, {0}, {1}, kvLoopProg, {dc, "dk_j = dk.at[j].get()"}).squeeze({0});
@@ -501,14 +503,14 @@ poplar::Tensor serialisedAttentionGrad(
         Sequence qLoopProg; {
 
             // Condition for executing (true) or skipping (false) block
-            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, kvLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];
+            auto doBlock = popops::map(graph, ((pe::_1 + 1) * uint(chunkedQueryLen)) > (pe::_2 * uint(chunkedKVLen)), {qCounter, kvCounter}, qLoopProg, {dc, "(i+1) * q_chunk_size > j * kv_chunk_size"})[0];
 
             // Conditional execute block program body
             Sequence doBlockProg; 
 
             auto qi = popops::dynamicSlice(graph, query, qCounter, {0}, {1}, doBlockProg, {dc, "q_i = q.at[i].get()"}).squeeze({0});
             auto dqi = popops::dynamicSlice(graph, query_grad, qCounter, {0}, {1}, doBlockProg, {dc, "dq_i = dq.at[i].get()"}).squeeze({0});
-            auto doi = popops::dynamicSlice(graph, grad, qCounter, {0}, {1}, doBlockProg, {dc, "do_i = do.at[i].get()"}).squeeze({0});
+            auto doi = popops::dynamicSlice(graph, out_grad, qCounter, {0}, {1}, doBlockProg, {dc, "do_i = do.at[i].get()"}).squeeze({0});
             auto li = popops::dynamicSlice(graph, logSumExp, qCounter, {0}, {1}, doBlockProg, {dc, "lse_i = lse.at[i].get()"}).squeeze({0});
             auto si = popops::dynamicSlice(graph, sumOutXGrad, qCounter, {0}, {1}, doBlockProg, {dc, "s_i = s.at[i].get()"}).squeeze({0});
 

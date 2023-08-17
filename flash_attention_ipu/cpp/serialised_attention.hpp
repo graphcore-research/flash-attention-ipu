@@ -16,7 +16,7 @@ poplar::Tensor vanillaAttentionGrad(
     const poplar::Tensor& qkv, // shape 3 x G x L x D
     const poplar::Tensor& grad, // shape G x L x D
     poplar::program::Sequence& prog,
-    poplar::DebugContext& dc);
+    const poplar::DebugContext& dc);
 
 std::vector<poplar::Tensor> serialisedAttentionImpl(
     poplar::Graph& graph, 
