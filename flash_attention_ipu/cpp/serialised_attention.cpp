@@ -190,8 +190,8 @@ poplar::Tensor vanillaAttentionGrad(
     const poplar::Tensor& qkv, // shape 3 x G x L x D
     const poplar::Tensor& grad, // shape G x L x D
     poplar::program::Sequence& prog,
-    poplar::DebugContext& dc
-) {
+    poplar::DebugContext& dc) 
+    {
     assert(qkv.dim(0) == 3);
     auto query = qkv[0];
     auto key = qkv[1];
@@ -218,7 +218,9 @@ poplar::Tensor vanillaAttentionGrad(
     auto s = popops::reduce(graph, attn, attn.elementType(), {2}, {popops::Operation::ADD}, prog, {dc, "s = sum(attn, dim=2)"});
     popops::divInPlace(graph, attn, s.expand({2}), prog, {dc, "attn /= s"});
 
-    // Gradients!
+    /*
+    Compute gradients
+    */
 
     // grad_v
     auto value_grad = poplin::matMulGrouped(graph, attn.dimShuffle({0, 2, 1}), grad, prog, attn.elementType(), {dc, "dV = attn.T@dO"});
@@ -241,7 +243,7 @@ poplar::Tensor vanillaAttentionGrad(
     return qkv_grad;
 }
 
-poplar::Tensor serialisedAttention(
+std::vector<poplar::Tensor> serialisedAttentionImpl(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
     uint32_t num_chunks_q, 
@@ -410,9 +412,24 @@ poplar::Tensor serialisedAttention(
         popops::zero(graph, kvCounter, qLoopProg, {dc, "j=0"});
     }
     prog.add(Repeat(query.dim(0), qLoopProg, {dc, "serialised_attention_outer_loop_repeat"}));
-
     out = out.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
-    return out;
+
+    std::vector<poplar::Tensor> tensors;
+    tensors.push_back(out);
+    tensors.push_back(logSumExp);
+    return tensors;
+}
+
+poplar::Tensor serialisedAttention(
+    poplar::Graph& graph, 
+    const poplar::Tensor& qkv,  // Shape 3 x G x L x D
+    uint32_t num_chunks_q, 
+    uint32_t num_chunks_kv,
+    poplar::program::Sequence& prog,
+    const poplar::DebugContext& dc) {
+
+    auto out_tensors = serialisedAttentionImpl(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "serialised_attention"});
+    return out_tensors[0];
 }
 
 poplar::Tensor serialisedAttentionGrad(
@@ -424,8 +441,9 @@ poplar::Tensor serialisedAttentionGrad(
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc) {
 
-    auto out_rec = serialisedAttention(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "recompute_output"});
-
+    auto out_tensors = serialisedAttentionImpl(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "recompute_output"});
+    auto out_rec = out_tensors[0];
+    auto logSumExp = out_tensors[1];
     assert(qkv.dim(0) == 3);
 
     // get shape data
@@ -459,6 +477,70 @@ poplar::Tensor serialisedAttentionGrad(
     popops::zero(graph, key_grad, prog, {dc, "zero_dkey"});
     popops::zero(graph, value_grad, prog, {dc, "zero_dvalue"});
 
+    // outer loop counter on kv read
+    auto kvCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_kvCounter(j=0)"});
+    // inner loop counter on q read
+    auto qCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_qCounter(i=0)"});
+    
+    // gimme tiles
+    poputil::mapTensorLinearly(graph, kvCounter);
+    poputil::mapTensorLinearly(graph, qCounter);
+
+    popops::zero(graph, kvCounter, prog, {dc, "zero_kvCounter"});
+    popops::zero(graph, qCounter, prog, {dc, "zero_qCounter"});
+
+    popops::mulInPlace(graph, out, grad, prog, {dc, "D = out * grad"});
+    auto sumOutXGrad = popops::reduce(graph, out, out.elementType(), {2}, {popops::Operation::ADD}, prog, {dc, "s=sum(D)"});
+
+    Sequence kvLoopProg; {
+        auto kj = popops::dynamicSlice(graph, key, kvCounter, {0}, {1}, kvLoopProg, {dc, "k_j = k.at[j].get()"}).squeeze({0});
+        auto dkj = popops::dynamicSlice(graph, key_grad, kvCounter, {0}, {1}, kvLoopProg, {dc, "dk_j = dk.at[j].get()"}).squeeze({0});
+        auto vj = popops::dynamicSlice(graph, value, kvCounter, {0}, {1}, kvLoopProg, {dc, "v_j = v.at[j].get()"}).squeeze({0});
+        auto dvj = popops::dynamicSlice(graph, value_grad, kvCounter, {0}, {1}, kvLoopProg, {dc, "dv_j = dv.at[j].get()"}).squeeze({0});
+
+        Sequence qLoopProg; {
+            auto qi = popops::dynamicSlice(graph, query, qCounter, {0}, {1}, qLoopProg, {dc, "q_i = q.at[i].get()"}).squeeze({0});
+            auto dqi = popops::dynamicSlice(graph, query_grad, qCounter, {0}, {1}, qLoopProg, {dc, "dq_i = dq.at[i].get()"}).squeeze({0});
+            auto doi = popops::dynamicSlice(graph, grad, qCounter, {0}, {1}, qLoopProg, {dc, "do_i = do.at[i].get()"}).squeeze({0});
+            auto li = popops::dynamicSlice(graph, logSumExp, qCounter, {0}, {1}, qLoopProg, {dc, "lse_i = lse.at[i].get()"}).squeeze({0});
+            auto si = popops::dynamicSlice(graph, sumOutXGrad, qCounter, {0}, {1}, qLoopProg, {dc, "s_i = s.at[i].get()"}).squeeze({0});
+
+            auto t = poplin::matMulGrouped(graph, qi, kj.dimShuffle({0, 2, 1}), qLoopProg, kj.elementType(), {dc, "attn_ij = q_i @ k_j.T"});
+            popops::subInPlace(graph, t, li.expand({2}), qLoopProg, {dc, "attn_ij -= li"});
+            popops::expInPlace(graph, t, qLoopProg, "attn_ij = exp(att_ij)");
+
+            poplin::matMulGroupedAcc(graph, dvj, 1.0, t.dimShuffle({0, 2, 1}), doi, qLoopProg, {dc, "dv_j += attn_ij.T @ do_i"});
+            
+            auto dt = poplin::matMulGrouped(graph, doi, vj.dimShuffle({0, 2, 1}), qLoopProg, doi.elementType(), {dc, "dattn_ij = do_i @ v_j.T"});
+            popops::subInPlace(graph, dt, si.expand({2}), qLoopProg, {dc, "dattn_ij -= s_i"});
+            popops::mulInPlace(graph, dt, t, qLoopProg, {dc, "dattn_ij *= attn_ij"});
+
+            poplin::matMulGroupedAcc(graph, dqi, 1.0, dt, kj, qLoopProg, {dc, "dq_i += dattn_ij @ k_j"});
+            poplin::matMulGroupedAcc(graph, dkj, 1.0, dt.dimShuffle({0, 2, 1}), qi, qLoopProg, {dc, "dk_j += dattn_ij.T @ q_i"});
+
+            popops::dynamicUpdate(graph, query_grad, dqi.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "dq = dq.at[i].set(dq_i"});
+            popops::mapInPlace(graph, pe::_1 + 1, {qCounter}, qLoopProg, {dc, "i+=1"});
+        }
+        kvLoopProg.add(Repeat(query.dim(0), qLoopProg, {dc, "backward_inner_repeat"}));
+
+        popops::dynamicUpdate(graph, key_grad, dkj.expand({0}), kvCounter, {0}, {1}, kvLoopProg, {dc, "dk = dk.at[j].set(dk_j)"});
+        popops::dynamicUpdate(graph, value_grad, dvj.expand({0}), kvCounter, {0}, {1}, kvLoopProg, {dc, "dv = dv.at[j].set(dv_j)"});
+
+        // update kv loop counter
+        popops::mapInPlace(graph, pe::_1 + 1, {kvCounter}, kvLoopProg, {dc, "i+=1"});
+        // reset kv loop counter
+        popops::zero(graph, qCounter, kvLoopProg, {dc, "j=0"});
+    }
+    prog.add(Repeat(key.dim(0), kvLoopProg, {dc, "backward_outer_repeat"}));
+
+    query_grad = query_grad.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
+    key_grad = key_grad.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
+    value_grad = value_grad.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
+    auto dqkv_cat = poplar::concat({query_grad.expand({0}), key_grad.expand({0}), value_grad.expand({0})}, 0);
+    auto dqkv = graph.clone(qkv);
+    prog.add(Copy(dqkv_cat, dqkv));
+
+    return dqkv;
 }
 
 // popart
