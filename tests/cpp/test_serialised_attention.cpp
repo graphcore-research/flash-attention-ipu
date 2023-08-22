@@ -146,8 +146,8 @@ namespace {
         poplar::program::Sequence vanillaAttentionGradProg;
         poplar::program::Sequence serialisedAttentionGradProg;
 
-        auto out_v = vanillaAttentionGrad(graph, qkv, grad, vanillaAttentionGradProg, {dc, "vanilla_attention_grad"});
-        auto out_s = serialisedAttentionGrad(graph, qkv, grad, qChunks, kvChunks, serialisedAttentionGradProg, {dc, "serialised_attention_grad"});
+        auto out_v = vanillaAttentionGrad(graph, grad, qkv, vanillaAttentionGradProg, {dc, "vanilla_attention_grad"});
+        auto out_s = serialisedAttentionGrad(graph, grad, qkv, qChunks, kvChunks, serialisedAttentionGradProg, {dc, "serialised_attention_grad"});
 
         prog.add(vanillaAttentionGradProg);
         prog.add(serialisedAttentionGradProg);

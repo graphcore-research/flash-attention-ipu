@@ -434,8 +434,8 @@ poplar::Tensor serialisedAttention(
 
 poplar::Tensor serialisedAttentionGrad(
     poplar::Graph& graph,
-    const poplar::Tensor& qkv, // Shape 3 x G x L x D
     const poplar::Tensor& grad, // Shape G x L x D
+    const poplar::Tensor& qkv, // Shape 3 x G x L x D
     uint32_t num_chunks_q,
     uint32_t num_chunks_kv,
     poplar::program::Sequence& prog,
@@ -606,8 +606,48 @@ poplar::Tensor serialisedAttentionGrad(
 // popart
 
 const popart::OperatorIdentifier SerialisedAttentionId = {"ai.graphcore", "SerialisedAttention", 1};
+const popart::OperatorIdentifier SerialisedAttentionGradId = {"ai.graphcore", "SerialisedAttentionGrad", 1};
 
 class SerialisedAttentionOp;
+class SerialisedAttentionGradOp;
+
+class SerialisedAttentionGradOp : public popart::Op {
+    public:
+    SerialisedAttentionGradOp(const SerialisedAttentionOp& fwdOp);
+
+    std::unique_ptr<popart::Op> clone() const final { 
+        return std::make_unique<SerialisedAttentionGradOp>(*this);
+    }
+
+    void setup() final {outInfo(0) = inInfo(0);};
+
+    void appendAttributes(popart::OpSerialiserBase& os) const override;
+
+    void appendOutlineAttributes(popart::OpSerialiserBase& os) const override;
+
+    const std::vector<popart::GradInOutMapper> &gradInputInfo() const {
+        static const std::vector<popart::GradInOutMapper> inInfo = {
+            {0, 0, popart::GradOpInType::GradOut},
+            {1, 0, popart::GradOpInType::In}};
+        return inInfo;
+    }
+
+    const std::map<int, int> &gradOutToNonGradIn() const {
+        static const std::map<int, int> outInfo = {{0, 0}};
+        return outInfo;
+    }
+
+    float getSubgraphValue() const final {return getHighSubgraphValue();}
+
+    bool requiresRandomSeed() const override { return false; }
+
+    unsigned getNumChunksQ() const {return num_chunks_q; }
+    unsigned getNumChunksKV() const {return num_chunks_kv; }
+
+    private:
+    unsigned num_chunks_q;
+    unsigned num_chunks_kv;
+};
 
 class SerialisedAttentionOp : public popart::Op {
     public:
@@ -626,6 +666,12 @@ class SerialisedAttentionOp : public popart::Op {
         assert(qkvInfo.dim(0) == 3);
 
         outInfo(0) = popart::TensorInfo(qkvInfo.dataType(), {qkvInfo.dim(1), qkvInfo.dim(2), qkvInfo.dim(3)});
+    }
+
+    std::vector<std::unique_ptr<popart::Op>> getGradOps() {
+        std::vector<std::unique_ptr<Op>> upops;
+        upops.emplace_back(new SerialisedAttentionGradOp(*this));
+        return upops;
     }
 
     void appendAttributes(popart::OpSerialiserBase& os) const override {
@@ -686,4 +732,37 @@ class SerialisedAttentionOpx : public popart::popx::Opx {
     }
 };
 
+class SerialisedAttentionGradOpx : public popart::popx::Opx {
+    public:
+    SerialisedAttentionGradOpx(popart::Op* op, popart::popx::Devicex* devicex) : popart::popx::Opx(op, devicex) {
+        verifyOp<SerialisedAttentionGradOp>(op, {SerialisedAttentionId});
+    }
+
+    void grow(poplar::program::Sequence& prog) const final {
+        auto op = getOp<SerialisedAttentionGradOp>();
+        poplar::Tensor grad = getInTensor(0);
+        poplar::Tensor qkv = getInTensor(1);
+        auto num_chunks_q = op.getNumChunksQ();
+        auto num_chunks_kv = op.getNumChunksKV();
+        poplar::Tensor out = serialisedAttentionGrad(graph(), grad, qkv, num_chunks_q, num_chunks_kv, prog, "attention_grad");
+        setOutTensor(0, out);
+    }
+};
+
+SerialisedAttentionGradOp::SerialisedAttentionGradOp(const SerialisedAttentionOp& fwdOp)
+    : popart::Op(SerialisedAttentionGradId, fwdOp.settings), num_chunks_q(fwdOp.getNumChunksQ()), num_chunks_kv(fwdOp.getNumChunksKV()) {}
+
+void SerialisedAttentionGradOp::appendAttributes(popart::OpSerialiserBase& os) const {
+    popart::Op::appendAttributes(os);
+    os.appendAttribute("num_chunks_q", getNumChunksQ());
+    os.appendAttribute("num_chunks_kv", getNumChunksKV());
+}
+
+void SerialisedAttentionGradOp::appendOutlineAttributes(popart::OpSerialiserBase& os) const {
+    Op::appendOutlineAttributes(os);
+    os.appendAttribute("num_chunks_q", getNumChunksQ());
+    os.appendAttribute("num_chunks_kv", getNumChunksKV());
+}
+
 static popart::popx::OpxCreator<SerialisedAttentionOpx> SerialisedAttentionOpxCreator({SerialisedAttentionId});
+static popart::popx::OpxCreator<SerialisedAttentionGradOpx> SerialisedAttentionGradOpxCreator({SerialisedAttentionGradId});
