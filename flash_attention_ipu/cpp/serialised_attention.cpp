@@ -472,7 +472,7 @@ poplar::Tensor serialisedAttentionGrad(
     prog.add(Copy(qkv[0].reshape({groups, num_chunks_q, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), query));
     prog.add(Copy(qkv[1].reshape({groups, num_chunks_kv, chunkedKVLen, headDim}).dimShuffle({1, 0, 2, 3}), key));
     prog.add(Copy(qkv[2].reshape({groups, num_chunks_kv, chunkedKVLen, headDim}).dimShuffle({1, 0, 2, 3}), value));
-    prog.add(Copy(grad.reshape({groups, num_chunks_kv, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), out_grad));
+    prog.add(Copy(grad.reshape({groups, num_chunks_q, chunkedQueryLen, headDim}).dimShuffle({1, 0, 2, 3}), out_grad));
 
     auto query_grad = graph.clone(query, {dc, "dquery = array_like(query)"});
     auto key_grad = graph.clone(key, {dc, "dkey = array_like(key)"});
@@ -573,11 +573,12 @@ poplar::Tensor serialisedAttentionGrad(
             
             poplin::matMulGroupedAcc(graph, dqi, 1.0, dt, kj, doBlockProg, {dc, "dq_i += dattn_ij @ k_j"});
             poplin::matMulGroupedAcc(graph, dkj, 1.0, dt.dimShuffle({0, 2, 1}), qi, doBlockProg, {dc, "dk_j += dattn_ij.T @ q_i"});
-            
+
+            popops::dynamicUpdate(graph, query_grad, dqi.expand({0}), qCounter, {0}, {1}, doBlockProg, {dc, "dq = dq.at[i].set(dq_i"});
+
             Sequence skipBlockProg;
             qLoopProg.add(If(doBlock, doBlockProg, skipBlockProg));
 
-            popops::dynamicUpdate(graph, query_grad, dqi.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "dq = dq.at[i].set(dq_i"});
             popops::mapInPlace(graph, pe::_1 + 1, {qCounter}, qLoopProg, {dc, "i+=1"});
         }
         kvLoopProg.add(Repeat(query.dim(0), qLoopProg, {dc, "backward_inner_repeat"}));
@@ -586,9 +587,9 @@ poplar::Tensor serialisedAttentionGrad(
         popops::dynamicUpdate(graph, value_grad, dvj.expand({0}), kvCounter, {0}, {1}, kvLoopProg, {dc, "dv = dv.at[j].set(dv_j)"});
 
         // update kv loop counter
-        popops::mapInPlace(graph, pe::_1 + 1, {kvCounter}, kvLoopProg, {dc, "i+=1"});
+        popops::mapInPlace(graph, pe::_1 + 1, {kvCounter}, kvLoopProg, {dc, "j+=1"});
         // reset kv loop counter
-        popops::zero(graph, qCounter, kvLoopProg, {dc, "j=0"});
+        popops::zero(graph, qCounter, kvLoopProg, {dc, "i=0"});
     }
     prog.add(Repeat(key.dim(0), kvLoopProg, {dc, "backward_outer_repeat"}));
 
