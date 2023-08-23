@@ -36,8 +36,8 @@ poplar::Tensor serialisedAttention(
 
 poplar::Tensor serialisedAttentionGrad(
     poplar::Graph& graph,
-    const poplar::Tensor& qkv, // Shape 3 x G x L x D
     const poplar::Tensor& grad, // Shape G x L x D
+    const poplar::Tensor& qkv, // Shape 3 x G x L x D
     uint32_t num_chunks_q,
     uint32_t num_chunks_kv,
     poplar::program::Sequence& prog,
