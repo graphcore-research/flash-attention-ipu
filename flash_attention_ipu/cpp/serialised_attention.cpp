@@ -619,7 +619,7 @@ class SerialisedAttentionGradOp : public popart::Op {
         return std::make_unique<SerialisedAttentionGradOp>(*this);
     }
 
-    void setup() final {outInfo(0) = inInfo(0);};
+    void setup() final {outInfo(0) = inInfo(1);};
 
     void appendAttributes(popart::OpSerialiserBase& os) const override;
 
@@ -735,7 +735,7 @@ class SerialisedAttentionOpx : public popart::popx::Opx {
 class SerialisedAttentionGradOpx : public popart::popx::Opx {
     public:
     SerialisedAttentionGradOpx(popart::Op* op, popart::popx::Devicex* devicex) : popart::popx::Opx(op, devicex) {
-        verifyOp<SerialisedAttentionGradOp>(op, {SerialisedAttentionId});
+        verifyOp<SerialisedAttentionGradOp>(op, {SerialisedAttentionGradId});
     }
 
     void grow(poplar::program::Sequence& prog) const final {

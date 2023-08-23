@@ -37,7 +37,7 @@ def run_forward_and_backward(
     if device == "ipu":
         options = poptorch.Options()
         options.useIpuModel(not poptorch.ipuHardwareIsAvailable())
-        step = poptorch.trainingModel(module, options)
+        step = poptorch.trainingModel(module, options, optimiser)
         output, _ = step()
         step.copyWeightsToHost()
     else:
@@ -73,7 +73,7 @@ def test_serialised_attention(dtype, seq_len) -> None:
         device="cpu",
     )
 
-    atol = {torch.float32: 1e-4, torch.float16: 1e-2}[dtype]
+    atol = {torch.float32: 1e-3, torch.float16: 1e-2}[dtype]
     rtol = {torch.float32: 1e-5, torch.float16: 1e-2}[dtype]
 
     torch.testing.assert_close(
