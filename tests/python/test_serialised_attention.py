@@ -33,6 +33,8 @@ def run_forward_and_backward(
             return outputs, loss
 
     module = TestModule()
+    if device == "cuda":
+        module.to("cuda")
     optimiser = torch.optim.SGD(module.parameters(), 1.0)
     if device == "ipu":
         options = poptorch.Options()
@@ -59,11 +61,11 @@ def test_serialised_attention(dtype, seq_len) -> None:
     qkv = torch.randn(3, N, seq_len, D)
     grad = torch.randn(N, seq_len, D)
 
-    output_ipu = run_forward_and_backward(
+    output_gpu = run_forward_and_backward(
         fn=lambda qkv: dict(out=serialised_attention(qkv, 16, 16)),
         inputs=dict(qkv=qkv),
         grad_outputs=dict(out=grad),
-        device="ipu",
+        device="cuda",
     )
 
     output_cpu = run_forward_and_backward(
@@ -77,14 +79,14 @@ def test_serialised_attention(dtype, seq_len) -> None:
     rtol = {torch.float32: 1e-5, torch.float16: 1e-2}[dtype]
 
     torch.testing.assert_close(
-        output_ipu["out"],
+        output_gpu["out"],
         output_cpu["out"],
         rtol=rtol,
         atol=atol,
     )
 
     torch.testing.assert_close(
-        output_ipu["grad_qkv"],
+        output_gpu["grad_qkv"],
         output_cpu["grad_qkv"],
         rtol=rtol,
         atol=atol,
