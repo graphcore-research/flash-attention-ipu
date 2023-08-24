@@ -5,9 +5,11 @@
 #include <poplar/Graph.hpp>
 #include <poplar/Tensor.hpp>
 
-poplar::Tensor vanillaAttention(
-    poplar::Graph& graph,
-    const poplar::Tensor& qkv, // Shape 3 x G x L x D
+std::vector<poplar::Tensor> serialisedAttentionImpl(
+    poplar::Graph& graph, 
+    const poplar::Tensor& qkv,  // Shape 3 x G x L x D
+    uint32_t num_chunks_q, 
+    uint32_t num_chunks_kv,
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc);
 
@@ -15,6 +17,15 @@ poplar::Tensor serialisedAttention(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
     uint32_t num_chunks_q, 
+    uint32_t num_chunks_kv,
+    poplar::program::Sequence& prog,
+    const poplar::DebugContext& dc);
+
+poplar::Tensor serialisedAttentionGrad(
+    poplar::Graph& graph,
+    const poplar::Tensor& grad, // Shape G x L x D
+    const poplar::Tensor& qkv, // Shape 3 x G x L x D
+    uint32_t num_chunks_q,
     uint32_t num_chunks_kv,
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc);

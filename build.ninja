@@ -16,9 +16,10 @@ rule linkexe
 
 # Library
 build build/obj/serialised_attention.o: compile flash_attention_ipu/cpp/serialised_attention.cpp
+build build/obj/vanilla_attention.o: compile flash_attention_ipu/cpp/vanilla_attention.cpp
 
 # ...link
-build build/libflash_attention.so: linkso build/obj/serialised_attention.o
+build build/libflash_attention.so: linkso build/obj/serialised_attention.o build/obj/vanilla_attention.o
 
 
 # Tests
@@ -26,5 +27,5 @@ build build/obj/tests/catch.o: compile third_party/catch2/extras/catch_amalgamat
 build build/obj/tests/test_serialised_attention.o: compile tests/cpp/test_serialised_attention.cpp
 
 # ...link
-build build/tests: linkexe build/obj/serialised_attention.o $
+build build/tests: linkexe build/obj/serialised_attention.o build/obj/vanilla_attention.o $
       build/obj/tests/test_serialised_attention.o build/obj/tests/catch.o
