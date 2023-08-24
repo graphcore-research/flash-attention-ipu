@@ -22,6 +22,7 @@
 #include <poprand/codelets.hpp>
 
 #include "serialised_attention.hpp"
+#include "vanilla_attention.hpp"
 
 using namespace poplar;
 using namespace poplar::program;

@@ -123,24 +123,6 @@ std::vector<int32_t> getTriuOffsetSequence(
     return offsets;
 }
 
-void triu(
-    poplar::Graph& graph,
-    const poplar::Tensor& t,
-    const int32_t k,
-    poplar::program::Sequence& prog,
-    const poplar::DebugContext& dc) {
-
-    assert(t.rank() >= 2);
-    int m = t.dim(t.rank() - 2);
-    int n = t.dim(t.rank() - 1);
-
-    size_t start = 0;
-    for (int i = m; i > 0 && i-1+k > 0; --i){
-        size_t end = size_t(std::min(i-1+k, n));
-        popops::zero(graph, t.slice({size_t(i-1), start}, {size_t(i), end}), prog, {dc, "triu_zero"});
-    }
-}
-
 std::vector<poplar::Tensor> serialisedAttentionImpl(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
