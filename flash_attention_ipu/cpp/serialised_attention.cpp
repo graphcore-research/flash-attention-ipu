@@ -123,6 +123,39 @@ std::vector<int32_t> getTriuOffsetSequence(
     return offsets;
 }
 
+struct dynamicMasks {
+    poplar::Tensor tensor;
+    poplar::Tensor counter;
+};
+
+dynamicMasks makeDynamicCausalMaskBlocks(
+    poplar::Graph& graph,
+    const poplar::Tensor& refTensor,
+    poplar::program::Sequence& prog,
+    const poplar::DebugContext& dc) {
+    
+    std::vector<int32_t> offsets = getTriuOffsetSequence(refTensor.dim(1), refTensor.dim(2));
+    auto masks = graph.cloneN(refTensor.elementType(), refTensor[0], offsets.size(), {dc, "masks = repeat(array_like(t[0]), offsets.size())"});
+    popops::fill(graph, masks, prog, -10000.0, {dc, "fill(masks, -10000.0)"});
+    for (size_t i = 0; i < offsets.size(); ++i){
+        int k = offsets[i];
+        int m = masks.dim(masks.rank() - 2);
+        int n = masks.dim(masks.rank() - 1);
+
+        size_t start = 0;
+        for (int j = m; j > 0 && j-1+k > 0; --j){
+            size_t end = size_t(std::min(j-1+k, n));
+            popops::zero(graph, masks.slice({i, size_t(j-1), start}, {i+1, size_t(j), end}), prog, {dc, "zero_for_triu(masks)"});
+            }
+    }
+    // mask counter on masked block execution
+    auto counter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_maskCounter(k=0)"});
+    poputil::mapTensorLinearly(graph, counter);
+    popops::zero(graph, counter, prog, {dc, "zero_maskCounter"});
+
+    return {masks, counter};
+}
+
 void dynamicAddMask(
     poplar::Graph& graph,
     const poplar::Tensor& t,
@@ -137,7 +170,12 @@ void dynamicAddMask(
     popops::mapInPlace(graph, ((pe::_1 + 1)%uint(masks.dim(0))), {maskCounter}, prog, {dc, "k = (k+1)%masks.size()"});
     }
 
-std::vector<poplar::Tensor> serialisedAttentionImpl(
+struct AttentionOutputWithStash {
+    poplar::Tensor output;
+    poplar::Tensor logSumExp;
+};
+
+AttentionOutputWithStash serialisedAttentionWithStash(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
     uint32_t num_chunks_q, 
@@ -192,11 +230,13 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
 
     // kv loop body program
     Sequence qLoopProg; {
-        // slice k and v
+        // slice q and output tensor
         auto qi = popops::dynamicSlice(graph, query, qCounter, {0}, {1}, qLoopProg, {dc, "q_i = q.at[i].get()"}).squeeze({0}); 
         auto oi = popops::dynamicSlice(graph, out, qCounter, {0}, {1}, qLoopProg, {dc, "o_i = o.at[i].get()"}).squeeze({0});
 
+        // slice running logSumExp
         auto li = popops::dynamicSlice(graph, logSumExp, qCounter, {0}, {1}, qLoopProg, {dc, "l_i = l.at[i].get()"}).squeeze({0});
+        // clone li for colocating running max on same tiles
         auto mi = graph.clone(li, {dc, "m_i = array_like(l_i)"});
         popops::fill(graph, mi, qLoopProg, -10000, {dc, "fill(m_i, -10000)"});
 
@@ -209,7 +249,7 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
             // Conditional execute block program body
             Sequence doBlockProg;
 
-            // slice q, output, and softmax running stats
+            // slice k and v
             auto kj = popops::dynamicSlice(graph, key, kvCounter, {0}, {1}, doBlockProg, {dc, "k_j = k.at[j].get()"}).squeeze({0});
             auto vj = popops::dynamicSlice(graph, value, kvCounter, {0}, {1}, doBlockProg, {dc, "v_j = v.at[j].get()"}).squeeze({0});
 
@@ -222,26 +262,7 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
             // generate causal masks
             // clone attention matrix block to colocate mask block elements with attn matrix block elements
             Sequence doMakeMasksProg;
-            std::vector<int32_t> offsets = getTriuOffsetSequence(chunkedQueryLen, chunkedKVLen);
-            // use cloneN to generate as many as needed by offsets.size()
-            auto masks = graph.cloneN(t.elementType(), t[0], offsets.size(), {dc, "masks = repeat(array_like(t[0]), offsets.size())"});
-            popops::fill(graph, masks, doMakeMasksProg, -10000.0, {dc, "fill(masks, -10000.0)"});
-            // Triu function above didn't work when passing a slice of a tensor, so it is inlined here
-            for (size_t i = 0; i < offsets.size(); ++i){
-                int k = offsets[i];
-                int m = masks.dim(masks.rank() - 2);
-                int n = masks.dim(masks.rank() - 1);
-
-                size_t start = 0;
-                for (int j = m; j > 0 && j-1+k > 0; --j){
-                    size_t end = size_t(std::min(j-1+k, n));
-                    popops::zero(graph, masks.slice({i, size_t(j-1), start}, {i+1, size_t(j), end}), doMakeMasksProg, {dc, "zero_for_triu(masks)"});
-                    }
-            }
-            // mask counter on masked block execution
-            auto maskCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_maskCounter(k=0)"});
-            poputil::mapTensorLinearly(graph, maskCounter);
-            popops::zero(graph, maskCounter, doMakeMasksProg, {dc, "zero_maskCounter"});
+            auto masks = makeDynamicCausalMaskBlocks(graph, t, doMakeMasksProg, {dc, "make_masks"});
 
             Sequence skipMakeMasksProg;
             doBlockProg.add(If(doMakeMasks, doMakeMasksProg, skipMakeMasksProg, {dc, "initialise_masks"}));
@@ -251,7 +272,7 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
             
             // Conditional add mask program body
             Sequence doMaskProg;
-            dynamicAddMask(graph, t, masks, maskCounter, doMaskProg, {dc, "add_mask"}); 
+            dynamicAddMask(graph, t, masks.tensor, masks.counter, doMaskProg, {dc, "add_mask"}); 
 
             // Empty skip mask program
             Sequence skipMaskProg;
@@ -281,7 +302,9 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
             popops::mulInPlace(graph, oi, c.expand({2}), doBlockProg, {dc, "o_i *= c"});
             poplin::matMulGroupedAcc(graph, oi, 1.0, t, vj, doBlockProg, {dc, "o_i += attn_ij @ v_j"});
             
+            // Empty skip block program
             Sequence skipBlockProg;
+            // Add block program to inner loop program
             kvLoopProg.add(If(doBlock, doBlockProg, skipBlockProg));
 
             // update kv loop counter
@@ -290,10 +313,12 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
         // repeat kv loop body in q loop body
         qLoopProg.add(Repeat(key.dim(0), kvLoopProg, {dc, "serialised_attention_inner_loop_repeat"}));
         
+        // apply denominator of softmax
         popops::divInPlace(graph, oi, li.expand({2}), qLoopProg, {dc, "o_i /= l_i"});
+        // update running logsumexp
         li = popops::map(graph, pe::_1 + pe::Log(pe::_2), {mi, li}, qLoopProg, {dc, "l_i = m_i + log(l_i)"});
         
-        // update output and running softmax stats
+        // update output and running logsumexp slices
         popops::dynamicUpdate(graph, out, oi.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "o = o.at[i].set(o_i)"});
         popops::dynamicUpdate(graph, logSumExp, li.expand({0}), qCounter, {0}, {1}, qLoopProg, {dc, "update logSumExp"});
 
@@ -302,13 +327,13 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
         // reset kv loop counter
         popops::zero(graph, kvCounter, qLoopProg, {dc, "j=0"});
     }
+    // Repeat q loop body in main body
     prog.add(Repeat(query.dim(0), qLoopProg, {dc, "serialised_attention_outer_loop_repeat"}));
+    
+    // Rearrange dims to remove chunking
     out = out.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
 
-    std::vector<poplar::Tensor> tensors;
-    tensors.push_back(out);
-    tensors.push_back(logSumExp);
-    return tensors;
+    return {out, logSumExp};
 }
 
 poplar::Tensor serialisedAttention(
@@ -319,8 +344,8 @@ poplar::Tensor serialisedAttention(
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc) {
 
-    auto out_tensors = serialisedAttentionImpl(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "serialised_attention"});
-    return out_tensors[0];
+    auto stash = serialisedAttentionWithStash(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "serialised_attention"});
+    return stash.output;
 }
 
 poplar::Tensor serialisedAttentionGrad(
@@ -332,9 +357,9 @@ poplar::Tensor serialisedAttentionGrad(
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc) {
 
-    auto out_tensors = serialisedAttentionImpl(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "recompute_output"});
-    auto out = out_tensors[0];
-    auto logSumExp = out_tensors[1];
+    auto stash = serialisedAttentionWithStash(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "recompute_output"});
+    auto out = stash.output;
+    auto logSumExp = stash.logSumExp;
     assert(qkv.dim(0) == 3);
 
     // get shape data
@@ -413,27 +438,8 @@ poplar::Tensor serialisedAttentionGrad(
             // generate causal masks
             // clone attention matrix block to colocate mask block elements with attn matrix block elements
             Sequence doMakeMasksProg;
-            std::vector<int32_t> offsets = getTriuOffsetSequence(chunkedQueryLen, chunkedKVLen);
-            // use cloneN to generate as many as needed by offsets.size()
-            auto masks = graph.cloneN(t.elementType(), t[0], offsets.size(), {dc, "masks = repeat(array_like(t[0]), offsets.size())"});
-            popops::fill(graph, masks, doMakeMasksProg, -10000.0, {dc, "fill(masks, -10000.0)"});
-            // Triu function above didn't work when passing a slice of a tensor, so it is inlined here
-            for (size_t i = 0; i < offsets.size(); ++i){
-                int k = offsets[i];
-                int m = masks.dim(masks.rank() - 2);
-                int n = masks.dim(masks.rank() - 1);
-
-                size_t start = 0;
-                for (int j = m; j > 0 && j-1+k > 0; --j){
-                    size_t end = size_t(std::min(j-1+k, n));
-                    popops::zero(graph, masks.slice({i, size_t(j-1), start}, {i+1, size_t(j), end}), doMakeMasksProg, {dc, "zero_for_triu(masks)"});
-                    }
-            }
-            // mask counter on masked block execution
-            auto maskCounter = graph.addVariable(poplar::UNSIGNED_INT, {1}, {dc, "init_maskCounter(k=0)"});
-            poputil::mapTensorLinearly(graph, maskCounter);
-            popops::zero(graph, maskCounter, doMakeMasksProg, {dc, "zero_maskCounter"});
-
+            auto masks = makeDynamicCausalMaskBlocks(graph, t, doMakeMasksProg, {dc, "make_masks"});
+            
             Sequence skipMakeMasksProg;
             doBlockProg.add(If(doMakeMasks, doMakeMasksProg, skipMakeMasksProg, {dc, "initialise_masks"}));
 
@@ -441,11 +447,8 @@ poplar::Tensor serialisedAttentionGrad(
             auto doMask = popops::map(graph, (pe::_1 * uint(chunkedQueryLen) < ((pe::_2 + 1) * uint(chunkedKVLen) - 1)), {qCounter, kvCounter}, doBlockProg, {dc, "i * q_chunk_size < (j+1) * kv_chunk_size - 1"})[0];
             
             // Conditional add mask program body
-            Sequence doMaskProg; 
-            auto blockMask = popops::dynamicSlice(graph, masks, maskCounter, {0}, {1}, doMaskProg, {dc, "get_mask"}).squeeze({0});
-            popops::addInPlace(graph, t, blockMask.expand({0}), doMaskProg, {dc, "attn_ij += mask_ij"});
-            // update mask counter
-            popops::mapInPlace(graph, ((pe::_1 + 1)%uint(masks.dim(0))), {maskCounter}, doMaskProg, {dc, "k = (k+1)%masks.size()"});
+            Sequence doMaskProg;
+            dynamicAddMask(graph, t, masks.tensor, masks.counter, doMaskProg, {dc, "add_mask"}); 
 
             // Empty skip mask program
             Sequence skipMaskProg;
@@ -453,41 +456,58 @@ poplar::Tensor serialisedAttentionGrad(
             // Add conditional mask program to execute block program 
             doBlockProg.add(If(doMask, doMaskProg, skipMaskProg, {dc, "q@k.T + mask if i==j else q@k.T"}));
             
+            // Subtracting logsumexp equivalent to dividing by softmax denominator in logspace
             popops::subInPlace(graph, t, li.expand({2}), doBlockProg, {dc, "attn_ij -= li"});
+            // Exponentiate result to recompute attention values
             popops::expInPlace(graph, t, doBlockProg, "attn_ij = exp(att_ij)");
 
+            // Update value grad chunk partial
             poplin::matMulGroupedAcc(graph, dvj, 1.0, t.dimShuffle({0, 2, 1}), doi, doBlockProg, {dc, "dv_j += attn_ij.T @ do_i"});
             
+            // Backpropagate attention grad chunk
             auto dt = poplin::matMulGrouped(graph, doi, vj.dimShuffle({0, 2, 1}), doBlockProg, doi.elementType(), {dc, "dattn_ij = do_i @ v_j.T"});
             popops::subInPlace(graph, dt, si.expand({2}), doBlockProg, {dc, "dattn_ij -= s_i"});
             popops::mulInPlace(graph, dt, t, doBlockProg, {dc, "dattn_ij *= attn_ij"});
             
+            // Update query grad chunk partial
             poplin::matMulGroupedAcc(graph, dqi, 1.0, dt, kj, doBlockProg, {dc, "dq_i += dattn_ij @ k_j"});
+            // Update key grad chunk partial
             poplin::matMulGroupedAcc(graph, dkj, 1.0, dt.dimShuffle({0, 2, 1}), qi, doBlockProg, {dc, "dk_j += dattn_ij.T @ q_i"});
 
+            // Update query grad slice
             popops::dynamicUpdate(graph, query_grad, dqi.expand({0}), qCounter, {0}, {1}, doBlockProg, {dc, "dq = dq.at[i].set(dq_i"});
 
             Sequence skipBlockProg;
             qLoopProg.add(If(doBlock, doBlockProg, skipBlockProg));
-
+            
+            // Update q loop counter
             popops::mapInPlace(graph, pe::_1 + 1, {qCounter}, qLoopProg, {dc, "i+=1"});
         }
+        // Repeat inner loop body in outer loop body
         kvLoopProg.add(Repeat(query.dim(0), qLoopProg, {dc, "backward_inner_repeat"}));
 
+        // Update key grad slice
         popops::dynamicUpdate(graph, key_grad, dkj.expand({0}), kvCounter, {0}, {1}, kvLoopProg, {dc, "dk = dk.at[j].set(dk_j)"});
+        // Update value grad slice
         popops::dynamicUpdate(graph, value_grad, dvj.expand({0}), kvCounter, {0}, {1}, kvLoopProg, {dc, "dv = dv.at[j].set(dv_j)"});
 
         // update kv loop counter
         popops::mapInPlace(graph, pe::_1 + 1, {kvCounter}, kvLoopProg, {dc, "j+=1"});
-        // reset kv loop counter
+        // reset q loop counter
         popops::zero(graph, qCounter, kvLoopProg, {dc, "i=0"});
     }
+    // Repeat outer loop body in outer loop body
     prog.add(Repeat(key.dim(0), kvLoopProg, {dc, "backward_outer_repeat"}));
 
+    // Rearrange dims to remove chunking
     query_grad = query_grad.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
     key_grad = key_grad.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
     value_grad = value_grad.dimShuffle({1, 0, 2, 3}).reshape({groups, seqLen, headDim});
+    
+    // Concatenate to match input shape
     auto dqkv_cat = poplar::concat({query_grad.expand({0}), key_grad.expand({0}), value_grad.expand({0})}, 0);
+    
+    // Copy data to input clone to match tile mapping
     auto dqkv = graph.clone(qkv);
     prog.add(Copy(dqkv_cat, dqkv));
 
