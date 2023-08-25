@@ -123,6 +123,20 @@ std::vector<int32_t> getTriuOffsetSequence(
     return offsets;
 }
 
+void dynamicAddMask(
+    poplar::Graph& graph,
+    const poplar::Tensor& t,
+    const poplar::Tensor& masks,
+    const poplar::Tensor& maskCounter,
+    poplar::program::Sequence& prog,
+    const poplar::DebugContext& dc) {
+    
+    auto blockMask = popops::dynamicSlice(graph, masks, maskCounter, {0}, {1}, prog, {dc, "get_mask"}).squeeze({0});
+    popops::addInPlace(graph, t, blockMask.expand({0}), prog, {dc, "attn_ij += mask_ij"});
+    // update mask counter
+    popops::mapInPlace(graph, ((pe::_1 + 1)%uint(masks.dim(0))), {maskCounter}, prog, {dc, "k = (k+1)%masks.size()"});
+    }
+
 std::vector<poplar::Tensor> serialisedAttentionImpl(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
@@ -236,11 +250,8 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
             auto doMask = popops::map(graph, (pe::_1 * uint(chunkedQueryLen) < ((pe::_2 + 1) * uint(chunkedKVLen) - 1)), {qCounter, kvCounter}, doBlockProg, {dc, "i * q_chunk_size < (j+1) * kv_chunk_size - 1"})[0];
             
             // Conditional add mask program body
-            Sequence doMaskProg; 
-            auto blockMask = popops::dynamicSlice(graph, masks, maskCounter, {0}, {1}, doMaskProg, {dc, "get_mask"}).squeeze({0});
-            popops::addInPlace(graph, t, blockMask.expand({0}), doMaskProg, {dc, "attn_ij += mask_ij"});
-            // update mask counter
-            popops::mapInPlace(graph, ((pe::_1 + 1)%uint(masks.dim(0))), {maskCounter}, doMaskProg, {dc, "k = (k+1)%masks.size()"});
+            Sequence doMaskProg;
+            dynamicAddMask(graph, t, masks, maskCounter, doMaskProg, {dc, "add_mask"}); 
 
             // Empty skip mask program
             Sequence skipMaskProg;
