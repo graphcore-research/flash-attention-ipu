@@ -36,7 +36,7 @@
 #include <algorithm>
 #include <vector>
 
-#include "serialised_attention.hpp"
+#include "flash_attention_qkv_packed.hpp"
 
 using namespace poplar;
 using namespace poplar::program;
@@ -170,12 +170,7 @@ void dynamicAddMask(
     popops::mapInPlace(graph, ((pe::_1 + 1)%uint(masks.dim(0))), {maskCounter}, prog, {dc, "k = (k+1)%masks.size()"});
     }
 
-struct AttentionOutputWithStash {
-    poplar::Tensor output;
-    poplar::Tensor logSumExp;
-};
-
-AttentionOutputWithStash serialisedAttentionWithStash(
+AttentionOutputWithStash flashAttentionQKVPackedWithStash(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
     uint32_t num_chunks_q, 
@@ -336,7 +331,7 @@ AttentionOutputWithStash serialisedAttentionWithStash(
     return {out, logSumExp};
 }
 
-poplar::Tensor serialisedAttention(
+poplar::Tensor flashAttentionQKVPacked(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
     uint32_t num_chunks_q, 
@@ -344,11 +339,11 @@ poplar::Tensor serialisedAttention(
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc) {
 
-    auto stash = serialisedAttentionWithStash(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "serialised_attention"});
+    auto stash = flashAttentionQKVPackedWithStash(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "serialised_attention"});
     return stash.output;
 }
 
-poplar::Tensor serialisedAttentionGrad(
+poplar::Tensor flashAttentionQKVPackedGrad(
     poplar::Graph& graph,
     const poplar::Tensor& grad, // Shape G x L x D
     const poplar::Tensor& qkv, // Shape 3 x G x L x D
@@ -357,7 +352,7 @@ poplar::Tensor serialisedAttentionGrad(
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc) {
 
-    auto stash = serialisedAttentionWithStash(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "recompute_output"});
+    auto stash = flashAttentionQKVPackedWithStash(graph, qkv, num_chunks_q, num_chunks_kv, prog, {dc, "recompute_output"});
     auto out = stash.output;
     auto logSumExp = stash.logSumExp;
     assert(qkv.dim(0) == 3);
@@ -516,18 +511,18 @@ poplar::Tensor serialisedAttentionGrad(
 
 // popart
 
-const popart::OperatorIdentifier SerialisedAttentionId = {"ai.graphcore", "SerialisedAttention", 1};
-const popart::OperatorIdentifier SerialisedAttentionGradId = {"ai.graphcore", "SerialisedAttentionGrad", 1};
+const popart::OperatorIdentifier FlashAttentionQKVPackedId = {"ai.graphcore", "FlashAttentionQKVPacked", 1};
+const popart::OperatorIdentifier FlashAttentionQKVPackedGradId = {"ai.graphcore", "FlashAttentionQKVPackedGrad", 1};
 
-class SerialisedAttentionOp;
-class SerialisedAttentionGradOp;
+class FlashAttentionQKVPackedOp;
+class FlashAttentionQKVPackedGradOp;
 
-class SerialisedAttentionGradOp : public popart::Op {
+class FlashAttentionQKVPackedGradOp : public popart::Op {
     public:
-    SerialisedAttentionGradOp(const SerialisedAttentionOp& fwdOp);
+    FlashAttentionQKVPackedGradOp(const FlashAttentionQKVPackedOp& fwdOp);
 
     std::unique_ptr<popart::Op> clone() const final { 
-        return std::make_unique<SerialisedAttentionGradOp>(*this);
+        return std::make_unique<FlashAttentionQKVPackedGradOp>(*this);
     }
 
     void setup() final {outInfo(0) = inInfo(1);};
@@ -560,16 +555,16 @@ class SerialisedAttentionGradOp : public popart::Op {
     unsigned num_chunks_kv;
 };
 
-class SerialisedAttentionOp : public popart::Op {
+class FlashAttentionQKVPackedOp : public popart::Op {
     public:
-    SerialisedAttentionOp(
+    FlashAttentionQKVPackedOp(
         const popart::OperatorIdentifier& _opid,
         unsigned _num_chunks_q,
         unsigned _num_chunks_kv,
         const popart::Op::Settings& settings_
     ) : popart::Op(_opid, settings_), num_chunks_q(_num_chunks_q), num_chunks_kv(_num_chunks_kv) {}
 
-    std::unique_ptr<Op> clone() const final { return std::make_unique<SerialisedAttentionOp>(*this); }
+    std::unique_ptr<Op> clone() const final { return std::make_unique<FlashAttentionQKVPackedOp>(*this); }
 
     void setup() final {
         auto qkvInfo = inInfo(0);
@@ -581,7 +576,7 @@ class SerialisedAttentionOp : public popart::Op {
 
     std::vector<std::unique_ptr<popart::Op>> getGradOps() {
         std::vector<std::unique_ptr<Op>> upops;
-        upops.emplace_back(new SerialisedAttentionGradOp(*this));
+        upops.emplace_back(new FlashAttentionQKVPackedGradOp(*this));
         return upops;
     }
 
@@ -612,68 +607,68 @@ class SerialisedAttentionOp : public popart::Op {
 static popart::OpDefinition::DataTypes T = {popart::DataType::FLOAT16, popart::DataType::FLOAT};
 
 static popart::OpDefinition 
-    SerialisedAttentionOpDef({
+    FlashAttentionQKVPackedOpDef({
         popart::OpDefinition::Inputs({{"qkv", T}}),
         popart::OpDefinition::Outputs({{"output", T}}),
         popart::OpDefinition::Attributes({{"num_chunks_q", {"int"}}, {"num_chunks_kv", {"int"}}})
     });
 
-static popart::OpCreator<SerialisedAttentionOp> SerialisedAttentionOpCreator(
-    popart::OpDefinitions({{SerialisedAttentionId, SerialisedAttentionOpDef}}),
+static popart::OpCreator<FlashAttentionQKVPackedOp> FlashAttentionQKVPackedOpCreator(
+    popart::OpDefinitions({{FlashAttentionQKVPackedId, FlashAttentionQKVPackedOpDef}}),
     [](const popart::OpCreatorInfo& info) {
         auto num_chunks_q = unsigned(info.attributes.getAttribute<popart::Attributes::Int>("num_chunks_q", 1u));
         auto num_chunks_kv = unsigned(info.attributes.getAttribute<popart::Attributes::Int>("num_chunks_kv", 1u));
-        return std::make_unique<SerialisedAttentionOp>(info.opid, num_chunks_q, num_chunks_kv, info.settings);
+        return std::make_unique<FlashAttentionQKVPackedOp>(info.opid, num_chunks_q, num_chunks_kv, info.settings);
     },
     true);
 
-class SerialisedAttentionOpx : public popart::popx::Opx {
+class FlashAttentionQKVPackedOpx : public popart::popx::Opx {
     public:
-    SerialisedAttentionOpx(popart::Op* op, popart::popx::Devicex* devicex) : popart::popx::Opx(op, devicex) {
-        verifyOp<SerialisedAttentionOp>(op, {SerialisedAttentionId});
+    FlashAttentionQKVPackedOpx(popart::Op* op, popart::popx::Devicex* devicex) : popart::popx::Opx(op, devicex) {
+        verifyOp<FlashAttentionQKVPackedOp>(op, {FlashAttentionQKVPackedId});
     }
 
     void grow(poplar::program::Sequence& prog) const final {
-        auto op = getOp<SerialisedAttentionOp>();
+        auto op = getOp<FlashAttentionQKVPackedOp>();
         poplar::Tensor qkv = getInTensor(0);
         auto num_chunks_q = op.getNumChunksQ();
         auto num_chunks_kv = op.getNumChunksKV();
-        poplar::Tensor out = serialisedAttention(graph(), qkv, num_chunks_q, num_chunks_kv, prog, "attention");
+        poplar::Tensor out = flashAttentionQKVPacked(graph(), qkv, num_chunks_q, num_chunks_kv, prog, "attention");
         setOutTensor(0, out);
     }
 };
 
-class SerialisedAttentionGradOpx : public popart::popx::Opx {
+class FlashAttentionQKVPackedGradOpx : public popart::popx::Opx {
     public:
-    SerialisedAttentionGradOpx(popart::Op* op, popart::popx::Devicex* devicex) : popart::popx::Opx(op, devicex) {
-        verifyOp<SerialisedAttentionGradOp>(op, {SerialisedAttentionGradId});
+    FlashAttentionQKVPackedGradOpx(popart::Op* op, popart::popx::Devicex* devicex) : popart::popx::Opx(op, devicex) {
+        verifyOp<FlashAttentionQKVPackedGradOp>(op, {FlashAttentionQKVPackedGradId});
     }
 
     void grow(poplar::program::Sequence& prog) const final {
-        auto op = getOp<SerialisedAttentionGradOp>();
+        auto op = getOp<FlashAttentionQKVPackedGradOp>();
         poplar::Tensor grad = getInTensor(0);
         poplar::Tensor qkv = getInTensor(1);
         auto num_chunks_q = op.getNumChunksQ();
         auto num_chunks_kv = op.getNumChunksKV();
-        poplar::Tensor out = serialisedAttentionGrad(graph(), grad, qkv, num_chunks_q, num_chunks_kv, prog, "attention_grad");
+        poplar::Tensor out = flashAttentionQKVPackedGrad(graph(), grad, qkv, num_chunks_q, num_chunks_kv, prog, "attention_grad");
         setOutTensor(0, out);
     }
 };
 
-SerialisedAttentionGradOp::SerialisedAttentionGradOp(const SerialisedAttentionOp& fwdOp)
-    : popart::Op(SerialisedAttentionGradId, fwdOp.settings), num_chunks_q(fwdOp.getNumChunksQ()), num_chunks_kv(fwdOp.getNumChunksKV()) {}
+FlashAttentionQKVPackedGradOp::FlashAttentionQKVPackedGradOp(const FlashAttentionQKVPackedOp& fwdOp)
+    : popart::Op(FlashAttentionQKVPackedGradId, fwdOp.settings), num_chunks_q(fwdOp.getNumChunksQ()), num_chunks_kv(fwdOp.getNumChunksKV()) {}
 
-void SerialisedAttentionGradOp::appendAttributes(popart::OpSerialiserBase& os) const {
+void FlashAttentionQKVPackedGradOp::appendAttributes(popart::OpSerialiserBase& os) const {
     popart::Op::appendAttributes(os);
     os.appendAttribute("num_chunks_q", getNumChunksQ());
     os.appendAttribute("num_chunks_kv", getNumChunksKV());
 }
 
-void SerialisedAttentionGradOp::appendOutlineAttributes(popart::OpSerialiserBase& os) const {
+void FlashAttentionQKVPackedGradOp::appendOutlineAttributes(popart::OpSerialiserBase& os) const {
     Op::appendOutlineAttributes(os);
     os.appendAttribute("num_chunks_q", getNumChunksQ());
     os.appendAttribute("num_chunks_kv", getNumChunksKV());
 }
 
-static popart::popx::OpxCreator<SerialisedAttentionOpx> SerialisedAttentionOpxCreator({SerialisedAttentionId});
-static popart::popx::OpxCreator<SerialisedAttentionGradOpx> SerialisedAttentionGradOpxCreator({SerialisedAttentionGradId});
+static popart::popx::OpxCreator<FlashAttentionQKVPackedOpx> FlashAttentionQKVPackedOpxCreator({FlashAttentionQKVPackedId});
+static popart::popx::OpxCreator<FlashAttentionQKVPackedGradOpx> FlashAttentionQKVPackedGradOpxCreator({FlashAttentionQKVPackedGradId});

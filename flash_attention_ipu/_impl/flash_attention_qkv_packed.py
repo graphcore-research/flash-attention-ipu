@@ -2,7 +2,7 @@ import poptorch
 import torch
 
 
-def serialised_attention(
+def flash_attention_qkv_packed(
     qkv: torch.Tensor, num_chunks_q: int, num_chunks_kv: int
 ) -> torch.Tensor:
     """
@@ -16,24 +16,26 @@ def serialised_attention(
 
     """
     if qkv.ndim != 4:
-        raise ValueError("serialed_attention expects qkv input to have 4 dimensions")
+        raise ValueError(
+            "flash_attention_qkv_packed expects qkv input to have 4 dimensions"
+        )
     if qkv.shape[0] != 3:
         raise ValueError(
-            "serialised_attention expects qkv input to have size 3 at dimension 0"
+            "flash_attention_qkv_packed expects qkv input to have size 3 at dimension 0"
         )
     if qkv.shape[2] % num_chunks_q != 0:
         raise ValueError(
-            "serialised_attention expects qkv size at dimension 2 to be divisible by num_chunks_q"
+            "flash_attention_qkv_packed expects qkv size at dimension 2 to be divisible by num_chunks_q"
         )
     if qkv.shape[2] % num_chunks_kv != 0:
         raise ValueError(
-            "serialised_attention expects qkv size at dimension 2 to be divisible by num_chunks_kv"
+            "flash_attention_qkv_packed expects qkv size at dimension 2 to be divisible by num_chunks_kv"
         )
 
     out: torch.Tensor
     if poptorch.isRunningOnIpu():
         (out,) = poptorch.custom_op(
-            name="SerialisedAttention",
+            name="FlashAttentionQKVPacked",
             domain_version=1,
             domain="ai.graphcore",
             inputs=[qkv],
@@ -51,4 +53,4 @@ def serialised_attention(
     return out
 
 
-__all__ = ["serialised_attention"]
+__all__ = ["flash_attention_qkv_packed"]

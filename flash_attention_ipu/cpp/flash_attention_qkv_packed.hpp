@@ -1,11 +1,16 @@
-#ifndef SERIALISED_ATTENTION_HPP
-#define SERIALISED_ATTENTION_HPP
+#ifndef FLASH_ATTENTION_QKV_PACKED_HPP
+#define FLASH_ATTENTION_QKV_PACKED_HPP
 
 #include <poplar/DebugContext.hpp>
 #include <poplar/Graph.hpp>
 #include <poplar/Tensor.hpp>
 
-std::vector<poplar::Tensor> serialisedAttentionImpl(
+struct AttentionOutputWithStash {
+    poplar::Tensor output;
+    poplar::Tensor logSumExp;
+};
+
+AttentionOutputWithStash flashAttentionQKVPackedWithStash(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
     uint32_t num_chunks_q, 
@@ -13,7 +18,7 @@ std::vector<poplar::Tensor> serialisedAttentionImpl(
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc);
 
-poplar::Tensor serialisedAttention(
+poplar::Tensor flashAttentionQKVPacked(
     poplar::Graph& graph, 
     const poplar::Tensor& qkv,  // Shape 3 x G x L x D
     uint32_t num_chunks_q, 
@@ -21,7 +26,7 @@ poplar::Tensor serialisedAttention(
     poplar::program::Sequence& prog,
     const poplar::DebugContext& dc);
 
-poplar::Tensor serialisedAttentionGrad(
+poplar::Tensor flashAttentionQKVPackedGrad(
     poplar::Graph& graph,
     const poplar::Tensor& grad, // Shape G x L x D
     const poplar::Tensor& qkv, // Shape 3 x G x L x D
