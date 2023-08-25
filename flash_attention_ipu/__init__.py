@@ -19,5 +19,5 @@ def _load_native_library() -> None:
 
 _load_native_library()
 
-from ._impl.serialised_attention import *
-from ._impl.serialised_attention import __all__
+from ._impl.flash_attention_qkv_packed import *
+from ._impl.flash_attention_qkv_packed import __all__

@@ -4,7 +4,7 @@ import poptorch
 import torch
 import torch.nn as nn
 
-from flash_attention_ipu import serialised_attention
+from flash_attention_ipu import flash_attention_qkv_packed
 
 import pytest
 
@@ -53,21 +53,21 @@ def run_forward_and_backward(
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.parametrize("seq_len", [256, 1024, 4096, 16384])
-def test_serialised_attention(dtype, seq_len) -> None:
+def test_flash_attention_qkv_packed(dtype, seq_len) -> None:
     torch.manual_seed(1123581321)
     N, D = 4, 128
     qkv = torch.randn(3, N, seq_len, D)
     grad = torch.randn(N, seq_len, D)
 
     output_ipu = run_forward_and_backward(
-        fn=lambda qkv: dict(out=serialised_attention(qkv, 16, 16)),
+        fn=lambda qkv: dict(out=flash_attention_qkv_packed(qkv, 16, 16)),
         inputs=dict(qkv=qkv),
         grad_outputs=dict(out=grad),
         device="ipu",
     )
 
     output_cpu = run_forward_and_backward(
-        fn=lambda qkv: dict(out=serialised_attention(qkv, 1, 1)),
+        fn=lambda qkv: dict(out=flash_attention_qkv_packed(qkv, 1, 1)),
         inputs=dict(qkv=qkv),
         grad_outputs=dict(out=grad),
         device="cpu",

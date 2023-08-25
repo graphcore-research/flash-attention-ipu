@@ -21,7 +21,7 @@
 #include <popnn/codelets.hpp>
 #include <poprand/codelets.hpp>
 
-#include "serialised_attention.hpp"
+#include "flash_attention_qkv_packed.hpp"
 #include "vanilla_attention.hpp"
 
 using namespace poplar;
@@ -72,13 +72,13 @@ namespace {
         qkv = poprand::normal(graph, &seedTensor, 0, qkv, qkv.elementType(), 0.0, 1.0, prog);
 
         poplar::program::Sequence vanillaAttentionProg;
-        poplar::program::Sequence serialisedAttentionProg;
+        poplar::program::Sequence flashAttentionProg;
 
         auto out_v = vanillaAttention(graph, qkv, vanillaAttentionProg, {dc, "vanilla_attention"});
-        auto out_s = serialisedAttention(graph, qkv, qChunks, kvChunks, serialisedAttentionProg, {dc, "serialised_attention"});
+        auto out_s = flashAttentionQKVPacked(graph, qkv, qChunks, kvChunks, flashAttentionProg, {dc, "flash_attention"});
 
         prog.add(vanillaAttentionProg);
-        prog.add(serialisedAttentionProg);
+        prog.add(flashAttentionProg);
 
         auto err = popops::sub(graph, out_v, out_s, prog, "e = x - y");
         popops::absInPlace(graph, err, prog, "e = abs(e)");
@@ -145,13 +145,13 @@ namespace {
         grad = poprand::normal(graph, &seedTensor, 1, grad, grad.elementType(), 0.0, 1.0, prog);
 
         poplar::program::Sequence vanillaAttentionGradProg;
-        poplar::program::Sequence serialisedAttentionGradProg;
+        poplar::program::Sequence flashAttentionGradProg;
 
         auto out_v = vanillaAttentionGrad(graph, grad, qkv, vanillaAttentionGradProg, {dc, "vanilla_attention_grad"});
-        auto out_s = serialisedAttentionGrad(graph, grad, qkv, qChunks, kvChunks, serialisedAttentionGradProg, {dc, "serialised_attention_grad"});
+        auto out_s = flashAttentionQKVPackedGrad(graph, grad, qkv, qChunks, kvChunks, flashAttentionGradProg, {dc, "flash_attention_grad"});
 
         prog.add(vanillaAttentionGradProg);
-        prog.add(serialisedAttentionGradProg);
+        prog.add(flashAttentionGradProg);
 
         auto err = popops::sub(graph, out_v, out_s, prog, "e = x - y");
         popops::absInPlace(graph, err, prog, "e = abs(e)");
@@ -213,10 +213,10 @@ namespace {
 
         qkv = poprand::normal(graph, &seedTensor, 0, qkv, qkv.elementType(), 0.0, 1.0, prog);
 
-        poplar::program::Sequence serialisedAttentionProg;
-        auto out = serialisedAttention(graph, qkv, qChunks, kvChunks, serialisedAttentionProg, {dc, "serialised_attention"});
-        auto cycles = poplar::cycleCount(graph, serialisedAttentionProg, 0, poplar::SyncType::EXTERNAL, {dc, "count cycles"});
-        prog.add(serialisedAttentionProg);
+        poplar::program::Sequence flashAttentionProg;
+        auto out = flashAttentionQKVPacked(graph, qkv, qChunks, kvChunks, flashAttentionProg, {dc, "flash_attention"});
+        auto cycles = poplar::cycleCount(graph, flashAttentionProg, 0, poplar::SyncType::EXTERNAL, {dc, "count cycles"});
+        prog.add(flashAttentionProg);
 
         auto cyclesFifo = graph.addDeviceToHostFIFO("cycles", cycles.elementType(), cycles.numElements());
         prog.add(Copy(cycles, cyclesFifo, false, {"cycles_d2h"}));
@@ -238,7 +238,7 @@ namespace {
     }
 
 
-    TEST_CASE("compare vanillaAttention vs serialisedAttention output", "[attention]") {
+    TEST_CASE("compare vanillaAttention vs flashAttention output", "[attention]") {
         SECTION("float32 4x6x6 test cases"){
             REQUIRE(compare_forward(4, 6, 2, 1, 1, {40, 90}, poplar::FLOAT) <= 1e-5);
             REQUIRE(compare_forward(4, 6, 2, 1, 2, {40, 90}, poplar::FLOAT) <= 1e-5);
@@ -266,7 +266,7 @@ namespace {
         }
     }
 
-    TEST_CASE("compare vanillaAttentionGrad vs serialisedAttentionGrad output", "[attentionGrad]") {
+    TEST_CASE("compare vanillaAttentionGrad vs flashAttentionGrad output", "[attentionGrad]") {
         SECTION("float32 4x6x6 test cases"){
             REQUIRE(compare_backward(4, 6, 2, 1, 1, {40, 90}, poplar::FLOAT) <= 1e-4);
             REQUIRE(compare_backward(4, 6, 2, 1, 2, {40, 90}, poplar::FLOAT) <= 1e-4);
@@ -294,7 +294,7 @@ namespace {
         }
     }
 
-    TEST_CASE("benchmark serialisedAttention performance", "[attentionperf]") {
+    TEST_CASE("benchmark flashAttention performance", "[attentionperf]") {
         SECTION("float32 8x256x256 cases"){
             benchmark_forward(8, 256, 128, 2, 2, {40, 90}, poplar::FLOAT);
             benchmark_forward(8, 256, 128, 2, 4, {40, 90}, poplar::FLOAT);
