@@ -21,3 +21,5 @@ _load_native_library()
 
 from ._impl.flash_attention_qkv_packed import *
 from ._impl.flash_attention_qkv_packed import __all__
+from ._impl.scaled_dot_product_attention import *
+from ._impl.scaled_dot_product_attention import __all__

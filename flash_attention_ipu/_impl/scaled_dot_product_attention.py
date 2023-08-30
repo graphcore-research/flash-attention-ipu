@@ -1,12 +1,12 @@
 from typing import Callable, Optional
 import torch
 import poptorch
-from flash_attention_qkv_packed import flash_attention_qkv_packed
-from utils import patch_function
-from math import log2, floor, ceil
+from .flash_attention_qkv_packed import flash_attention_qkv_packed
+from .utils import patch_function
+from math import log2, floor, ceil, prod
 
 
-@patch_function(torch.nn.functional.scaled_dot_product_attention, [torch])
+@patch_function(torch.nn.functional.scaled_dot_product_attention, [torch.nn.functional])
 def scaled_dot_product_attention_patch(
     orig_fn: Callable,
     query: torch.Tensor,
@@ -30,22 +30,26 @@ def scaled_dot_product_attention_patch(
         )
     if query.shape != key.shape:
         raise NotImplementedError(
-            "flash_attention_ipu does not currently support Grouped- or Multi-query attention"
+            "flash_attention_ipu does not currently support Grouped- or Multi-query \
+             attention (query.shape != key.shape)"
         )
     if key.shape != value.shape:
         raise NotImplementedError(
             "flash_attention_ipu does not currently support value.shape != key.shape"
         )
     if poptorch.isRunningOnIpu():
-        N, H, L, D = query.shape
+        L, D = query.shape[-2:]
+        batch_shape = query.shape[:-2]
 
-        num_chunks_q = int(2 ** (ceil(log2(L // D) / 2)))
-        num_chunks_kv = int(2 ** (floor(log2(L // D) / 2)))
-        query *= D**0.5
-        qkv = torch.stack([query, key, value])
+        num_chunks_q = int(2 ** (ceil(log2(max(L, D) // D) / 2)))
+        num_chunks_kv = int(2 ** (floor(log2(max(L, D) // D) / 2)))
+        qkv = torch.stack([query * D**-0.5, key, value])
         out = flash_attention_qkv_packed(
-            qkv.reshape(N * H, L, D), num_chunks_q, num_chunks_kv
+            qkv.reshape(3, prod(batch_shape), L, D), num_chunks_q, num_chunks_kv
         )
-        return out.reshape(N, H, L, D)
+        return out.reshape(*batch_shape, L, D)
     else:
         return orig_fn(query, key, value, attn_mask, dropout_p, is_causal)
+
+
+__all__ = ["scaled_dot_product_attention_patch"]
