@@ -21,7 +21,7 @@ def patch_function(orig_fn: Callable, modules_to_patch: List[Any]):
     def decorator_patch_fn(patched_fn: Callable):
         @wraps(orig_fn)
         def patch_wrapper(*args, **kwargs):
-            print(f"patching {orig_fn.__name__}!")
+            print(f"flash_attention_ipu: patching {orig_fn.__name__}!")
             return patched_fn(orig_fn, *args, **kwargs)
 
         fn_name = orig_fn.__name__

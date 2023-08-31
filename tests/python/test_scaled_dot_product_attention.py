@@ -4,6 +4,9 @@ import poptorch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+orig_fn = F.scaled_dot_product_attention
+
 import flash_attention_ipu
 
 import pytest
@@ -54,11 +57,11 @@ def run_forward_and_backward(
 @pytest.mark.parametrize("batch_shape", [(2,), (2, 3), (2, 3, 5)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.parametrize("seq_len", [256, 1024])
-def test_scaled_dot_product_attention(batch_shape, dtype, seq_len) -> None:
+def test_scaled_dot_product_attention_vs_cpu(batch_shape, dtype, seq_len) -> None:
     torch.manual_seed(1123581321)
     shape = (*batch_shape, seq_len, 64)
-    q, k, v = torch.randn(3, *shape)
-    grad = torch.randn(*shape)
+    q, k, v = torch.randn(3, *shape).to(dtype)
+    grad = torch.randn(*shape).to(dtype)
 
     output_ipu = run_forward_and_backward(
         fn=lambda q, k, v: dict(
@@ -106,3 +109,35 @@ def test_scaled_dot_product_attention(batch_shape, dtype, seq_len) -> None:
         rtol=rtol,
         atol=atol,
     )
+
+
+def test_out_of_memory_error_is_fixed() -> None:
+    torch.manual_seed(1123581321)
+    shape = (16, 2048, 64)
+    dtype = torch.float32
+    q, k, v = torch.randn(3, *shape).to(dtype)
+    grad = torch.randn(*shape).to(dtype)
+
+    try:
+        run_forward_and_backward(
+            fn=lambda q, k, v: dict(out=orig_fn(q, k, v, is_causal=True)),
+            inputs=dict(q=q, k=k, v=v),
+            grad_outputs=dict(out=grad),
+            device="ipu",
+        )
+        assert False  # This should go out of memory
+    except poptorch.poptorch_core.Error:
+        assert True
+
+    try:
+        run_forward_and_backward(
+            fn=lambda q, k, v: dict(
+                out=F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            ),
+            inputs=dict(q=q, k=k, v=v),
+            grad_outputs=dict(out=grad),
+            device="ipu",
+        )
+        assert True  # This should not go out of memory
+    except poptorch.poptorch_core.Error:
+        assert False

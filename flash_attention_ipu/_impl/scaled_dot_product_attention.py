@@ -7,7 +7,7 @@ from math import log2, floor, ceil, prod
 
 
 @patch_function(torch.nn.functional.scaled_dot_product_attention, [torch.nn.functional])
-def scaled_dot_product_attention_patch(
+def scaled_dot_product_attention_ipu(
     orig_fn: Callable,
     query: torch.Tensor,
     key: torch.Tensor,
@@ -41,8 +41,15 @@ def scaled_dot_product_attention_patch(
         L, D = query.shape[-2:]
         batch_shape = query.shape[:-2]
 
+        # Simple heuristic to choose num_chunks_q and num_chunks_kv
+        # General idea: keep attention blocks no larger than queries
+        # Choose num_chunks_q and num_chunks_kv such that nelms(q_chunk @ k_chunk.T) <= nelms(q)
+        # Use ratio of seq_len and head_dim to decide
+        # TODO: make rule more general for non-powers of 2.
+
         num_chunks_q = int(2 ** (ceil(log2(max(L, D) // D) / 2)))
         num_chunks_kv = int(2 ** (floor(log2(max(L, D) // D) / 2)))
+
         qkv = torch.stack([query * D**-0.5, key, value])
         out = flash_attention_qkv_packed(
             qkv.reshape(3, prod(batch_shape), L, D), num_chunks_q, num_chunks_kv
@@ -52,4 +59,4 @@ def scaled_dot_product_attention_patch(
         return orig_fn(query, key, value, attn_mask, dropout_p, is_causal)
 
 
-__all__ = ["scaled_dot_product_attention_patch"]
+__all__ = ["scaled_dot_product_attention_ipu"]
