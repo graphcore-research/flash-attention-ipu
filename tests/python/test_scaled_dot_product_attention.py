@@ -149,7 +149,3 @@ def test_out_of_memory_error_is_fixed() -> None:
         assert True  # This should not go out of memory
     except poptorch.poptorch_core.Error:
         assert False
-
-
-if __name__ == "__main__":
-    test_out_of_memory_error_is_fixed()
