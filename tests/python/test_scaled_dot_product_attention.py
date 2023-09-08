@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 orig_fn = F.scaled_dot_product_attention
 
-import flash_attention_ipu
+import flash_attention_ipu.auto
 
 import pytest
 
@@ -118,9 +118,14 @@ def test_out_of_memory_error_is_fixed() -> None:
     q, k, v = torch.randn(3, *shape).to(dtype)
     grad = torch.randn(*shape).to(dtype)
 
+    # Temporarily undo patch
+    patch_fn = F.scaled_dot_product_attention
+    F.scaled_dot_product_attention = F.scaled_dot_product_attention.__wrapped__
     try:
         run_forward_and_backward(
-            fn=lambda q, k, v: dict(out=orig_fn(q, k, v, is_causal=True)),
+            fn=lambda q, k, v: dict(
+                out=F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            ),
             inputs=dict(q=q, k=k, v=v),
             grad_outputs=dict(out=grad),
             device="ipu",
@@ -128,6 +133,9 @@ def test_out_of_memory_error_is_fixed() -> None:
         assert False  # This should go out of memory
     except poptorch.poptorch_core.Error:
         assert True
+
+    # Reapply patch
+    F.scaled_dot_product_attention = patch_fn
 
     try:
         run_forward_and_backward(
@@ -141,3 +149,7 @@ def test_out_of_memory_error_is_fixed() -> None:
         assert True  # This should not go out of memory
     except poptorch.poptorch_core.Error:
         assert False
+
+
+if __name__ == "__main__":
+    test_out_of_memory_error_is_fixed()

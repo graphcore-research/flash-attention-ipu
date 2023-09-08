@@ -7,7 +7,7 @@ from math import log2, floor, ceil, prod
 
 
 @patch_function(torch.nn.functional.scaled_dot_product_attention, [torch.nn.functional])
-def scaled_dot_product_attention_ipu(
+def _scaled_dot_product_attention_ipu(
     orig_fn: Callable,
     query: torch.Tensor,
     key: torch.Tensor,
@@ -57,6 +57,3 @@ def scaled_dot_product_attention_ipu(
         return out.reshape(*batch_shape, L, D)
     else:
         return orig_fn(query, key, value, attn_mask, dropout_p, is_causal)
-
-
-__all__ = ["scaled_dot_product_attention_ipu"]
