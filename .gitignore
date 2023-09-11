@@ -7,6 +7,10 @@ __pycache__/
 third_party/poplar
 third_party/popart
 
-.ninja_*
-
 .env
+.venv
+
+/demo/profiles
+/demo/local
+/demo/wandb
+/demo/.env
