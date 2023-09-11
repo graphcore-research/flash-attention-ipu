@@ -1,3 +1,5 @@
+// Copyright (c) 2023 Graphcore Ltd. All rights reserved.
+
 #include <poplar/Graph.hpp>
 #include <poplar/DeviceManager.hpp>
 #include <poplar/Tensor.hpp>
