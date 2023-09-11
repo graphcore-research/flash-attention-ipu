@@ -1,3 +1,5 @@
+// Copyright (c) 2023 Graphcore Ltd. All rights reserved.
+
 #ifndef VANILLA_ATTENTION_HPP
 #define VANILLA_ATTENTION_HPP
 

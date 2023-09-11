@@ -1,3 +1,5 @@
+// Copyright (c) 2023 Graphcore Ltd. All rights reserved.
+
 #ifndef FLASH_ATTENTION_QKV_PACKED_HPP
 #define FLASH_ATTENTION_QKV_PACKED_HPP
 

@@ -1,3 +1,5 @@
+# Copyright (c) 2023 Graphcore Ltd. All rights reserved.
+
 from typing import Callable, Optional
 import torch
 import poptorch

@@ -1,3 +1,6 @@
+# Copyright (c) 2023 Graphcore Ltd. All rights reserved.
+
+
 def _load_native_library() -> None:
     import ctypes
     import pathlib

@@ -1,3 +1,5 @@
+# Copyright (c) 2023 Graphcore Ltd. All rights reserved.
+
 CXX ?= g++
 OUT ?= build/libflash_attention.so
 OBJDIR ?= $(dir $(OUT))obj

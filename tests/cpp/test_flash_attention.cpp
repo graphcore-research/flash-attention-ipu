@@ -1,3 +1,5 @@
+// Copyright (c) 2023 Graphcore Ltd. All rights reserved.
+
 #include <catch_amalgamated.hpp>
 #include <iostream>
 
