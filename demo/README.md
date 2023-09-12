@@ -1,5 +1,6 @@
-# NanoGPT using FlashAttention for IPU
-Demo using flash-attention-ipu library with nanoGPT
+# Optimizing Memory Usage with Custom Ops: A Case Study with FlashAttention
+
+Demo using the `flash-attention-ipu` library with nanoGPT.
 
 # License
 Copyright (c) 2023 Graphcore Ltd. Licensed under the MIT License.
