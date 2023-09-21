@@ -7,6 +7,10 @@
 python -m pip install git+ssh://git@github.com/graphcore-research/flash-attention-ipu.git
 ```
 
+**Demo**
+
+[nanoGPT notebook](./demo/flash-attention-ipu-demo.ipynb)
+
 **Usage**
 ```python
 from flash_attention_ipu import flash_attention_qkv_packed
