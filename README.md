@@ -70,3 +70,5 @@ This initial attempt aims to keep memory consumption low using dynamic slicing a
 
 ## License
 Copyright (c) 2023 Graphcore Ltd. Licensed under the MIT License.
+
+Includes the third-party [Catch2](https://github.com/catchorg/Catch2/tree/cd60a0301cf8dd8da076166ad865f21325bc24fe) submodule for unit-testing, licensed under the BSL-1.0 License.
