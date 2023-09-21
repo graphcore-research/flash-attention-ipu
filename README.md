@@ -67,3 +67,6 @@ A Graphcore IPU chip has about 900 MB of SRAM split between 1472 tiles. Each til
 Assuming every tile is being used for computation when the entire model fits in IPU SRAM, performance is limited by how much data needs to be exchanged across tiles. As such, a good FlashAttention implementation for the IPU  minimises both memory usage and data exchange across tiles.
 
 This initial attempt aims to keep memory consumption low using dynamic slicing and outlined graphs. We also aim to keep exchange reasonably small using off-the-shelf tile mappings of tensors. We leave more customised tile mappings and further improvements to memory usage in future releases.
+
+## License
+Copyright (c) 2023 Graphcore Ltd. Licensed under the MIT License.
