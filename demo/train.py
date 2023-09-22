@@ -147,8 +147,6 @@ def run_training(
         model=model.config.__dict__,
     )
 
-    breakpoint()
-
     if cfg.profile:
         profile = Path(f"profiles/{cfg.experiment_name}")
         profile.mkdir(exist_ok=True, parents=True)

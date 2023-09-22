@@ -53,7 +53,6 @@ def plot_liveness_trace(report_path: str, save: bool = False):
     plt.title("nanoGPT Memory usage over time per training step")
     plt.legend()
 
-    # plt.xlim(0, 15000)
     plt.ylim(0, 1.2)
 
     if save:
