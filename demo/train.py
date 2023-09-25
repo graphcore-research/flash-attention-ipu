@@ -294,28 +294,31 @@ def train(model: nn.Module, **config_overrides: Any) -> pd.DataFrame:
     cfg.update(config_overrides)
     experiment_name = cfg["experiment_name"]
     print(f"Training {experiment_name} ...")
-    results = run_training(model, cfg)
-    do_plot = not DEFAULT_CONFIGS["profile"]
-    if "profile" in cfg.keys():
-        do_plot = not cfg["profile"]
-    if do_plot:
-        train_df = pd.DataFrame.from_dict(
-            {
-                "Steps": results["train"]["iters"],
-                "Loss": results["train"]["losses"],
-            }
-        )
-        valid_df = pd.DataFrame.from_dict(
-            {
-                "Steps": results["valid"]["iters"],
-                "Loss": results["valid"]["losses"],
-            }
-        )
-        train_df["Train/Valid"] = "training"
-        valid_df["Train/Valid"] = "validation"
-        df = pd.concat([train_df, valid_df])
-        df["Model"] = experiment_name
-        plot(df, experiment_name)
+    try:
+        results = run_training(model, cfg)
+        do_plot = not DEFAULT_CONFIGS["profile"]
+        if "profile" in cfg.keys():
+            do_plot = not cfg["profile"]
+        if do_plot:
+            train_df = pd.DataFrame.from_dict(
+                {
+                    "Steps": results["train"]["iters"],
+                    "Loss": results["train"]["losses"],
+                }
+            )
+            valid_df = pd.DataFrame.from_dict(
+                {
+                    "Steps": results["valid"]["iters"],
+                    "Loss": results["valid"]["losses"],
+                }
+            )
+            train_df["Train/Valid"] = "training"
+            valid_df["Train/Valid"] = "validation"
+            df = pd.concat([train_df, valid_df])
+            df["Model"] = experiment_name
+            plot(df, experiment_name)
+    except Exception as e:
+        pass
 
 
 if __name__ == "__main__":
