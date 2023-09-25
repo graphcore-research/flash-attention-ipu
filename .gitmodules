@@ -1,3 +1,6 @@
 [submodule "third_party/catch2"]
 	path = third_party/catch2
 	url = https://github.com/catchorg/Catch2.git
+[submodule "demo/nanoGPT"]
+	path = demo/nanoGPT
+	url = https://github.com/karpathy/nanoGPT
