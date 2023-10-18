@@ -78,10 +78,3 @@ def get_report_variables(report_path: str):
 
     df = pd.DataFrame.from_dict(temp_vars, orient="index")
     return df.sort_values("MB", ascending=False)
-
-
-if __name__ == "__main__":
-    plot_liveness_trace(
-        "/nethome/lukep/Projects/flash-attention-ipu-nanogpt-demo/profiles/230905-100000/training/profile.pop",
-        save=True,
-    )
