@@ -319,8 +319,3 @@ def train(model: nn.Module, **config_overrides: Any) -> pd.DataFrame:
             plot(df, experiment_name)
     except Exception as e:
         pass
-
-
-if __name__ == "__main__":
-    gpt = GPT(config)
-    train(gpt, experiment_name="test", block_size=256)

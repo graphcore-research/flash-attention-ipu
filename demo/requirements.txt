@@ -1,4 +1,4 @@
 seaborn
 tqdm
 torch
-git+ssh://git@github.com/graphcore-research/flash-attention-ipu.git
+git+https://git@github.com/graphcore-research/flash-attention-ipu.git
