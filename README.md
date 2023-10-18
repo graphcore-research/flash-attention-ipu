@@ -9,7 +9,7 @@ python -m pip install git+ssh://git@github.com/graphcore-research/flash-attentio
 
 **Demo**
 
-[nanoGPT notebook](./demo/flash-attention-ipu-demo.ipynb)
+[nanoGPT example](./demo/flash-attention-ipu-demo.ipynb) &nbsp;&nbsp;[![Run on Gradient](https://assets.paperspace.io/img/gradient-badge.svg)](https://ipu.dev/gxzKJY)
 
 **Usage**
 ```python
