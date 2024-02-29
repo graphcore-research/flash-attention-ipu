@@ -1,5 +1,5 @@
 # FlashAttention (IPU)
-*Poplar implementation of FlashAttention for IPU* 
+*Poplar implementation of FlashAttention for IPU*
 
 **Quickstart**
 ```bash
@@ -9,7 +9,7 @@ python -m pip install git+ssh://git@github.com/graphcore-research/flash-attentio
 
 **Demo**
 
-[nanoGPT example](./demo/flash-attention-ipu-demo.ipynb) &nbsp;&nbsp;[![Run on Gradient](https://assets.paperspace.io/img/gradient-badge.svg)](https://ipu.dev/gxzKJY)
+[nanoGPT example](./demo/flash-attention-ipu-demo.ipynb)
 
 **Usage**
 ```python
@@ -56,11 +56,11 @@ make
 
 **Background**
 
-FlashAttention solves a key bottleneck of dot product attention on GPUs, namely the reading and writing of the attention matrix between HBM and L2 Cache. 
+FlashAttention solves a key bottleneck of dot product attention on GPUs, namely the reading and writing of the attention matrix between HBM and L2 Cache.
 
 This becomes particularly problematic for training large models on long sequences as backpropagation requires either 1) storing the attention matrix for each layer, which can quickly exceed GPU maximum memory, or 2) recomputing the attention matrix, which dominates FLOPs when the sequence is long enough.
 
-FlashAttention overcomes this bottleneck by chunking the query, key, and value tensors along the sequence dimension and computing the attention matrix in chunks using an online softmax algorithm. 
+FlashAttention overcomes this bottleneck by chunking the query, key, and value tensors along the sequence dimension and computing the attention matrix in chunks using an online softmax algorithm.
 
 For small enough chunks, it is not necessary to read and write the attention matrix from HBM, and all intermediate tensors can fit in SRAM. As a result, this is both a memory-efficient and IO-efficient algorithm for computing dot-product attention.
 

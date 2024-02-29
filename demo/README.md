@@ -2,8 +2,6 @@
 
 Demo using the `flash-attention-ipu` library with nanoGPT.
 
-[![Run on Gradient](https://assets.paperspace.io/img/gradient-badge.svg)](https://ipu.dev/gxzKJY)
-
 # License
 Copyright (c) 2023 Graphcore Ltd. Licensed under the MIT License.
 
